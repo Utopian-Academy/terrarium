@@ -1,0 +1,13 @@
+#pragma once
+
+namespace terrarium {
+
+inline constexpr char kAppName[] = "@PROJECT_NAME@";
+inline constexpr char kVersionString[] = "@PROJECT_VERSION@";
+inline constexpr char kDisplayName[] = "@PROJECT_NAME@ @PROJECT_VERSION@";
+
+inline constexpr int kVersionMajor = @PROJECT_VERSION_MAJOR@;
+inline constexpr int kVersionMinor = @PROJECT_VERSION_MINOR@;
+inline constexpr int kVersionPatch = @PROJECT_VERSION_PATCH@;
+
+}  // namespace terrarium
