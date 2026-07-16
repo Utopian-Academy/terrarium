@@ -30,7 +30,8 @@
 // - Rain is overlay + modest water increase; storms add lightning and stronger wind.
 // - Big creatures are "stamped" at render time from anchor entities (simple, robust).
 
-#include <SDL.h>
+// NOTE: deliberately no SDL include here — the sim core is platform-free so
+// it can be reused by the plugin build (see plugin/).
 #ifdef _WIN32
   #include <windows.h>
   #include <mmsystem.h>
@@ -57,8 +58,15 @@ static constexpr int NUM_VOICES = 3;
 static inline float clamp11f(float v){ return v<-1.f?-1.f:(v>1.f?1.f:v); }
 
 
-static constexpr int W = 200;
-static constexpr int H = 112;
+// World size in cells. Overridable per-target (the pico build uses 200x200).
+#ifndef TERRA_W
+#define TERRA_W 200
+#endif
+#ifndef TERRA_H
+#define TERRA_H 112
+#endif
+static constexpr int W = TERRA_W;
+static constexpr int H = TERRA_H;
 
 static constexpr int CW = 96;
 static constexpr int CH = 54;
@@ -100,19 +108,31 @@ using Water = std::vector<std::vector<uint8_t>>;
 
 static inline bool inBounds(int x, int y) { return x >= 0 && x < W && y >= 0 && y < H; }
 
+// Fast xorshift64* RNG. The sim calls this millions of times per second in
+// the water/terrain passes; std::mt19937 + per-call distribution objects were
+// the single largest cost per tick (and far too slow for a Pi Zero build).
 struct Rng {
-  std::mt19937 rng;
-  Rng(uint32_t seed=0xC0FFEEu) : rng(seed) {}
-  uint32_t u32() { return rng(); }
-  int irange(int a,int b){ std::uniform_int_distribution<int> d(a,b); return d(rng); }
-  float u01(){ std::uniform_real_distribution<float> d(0.f,1.f); return d(rng); }
-  bool oneIn(int n){ std::uniform_int_distribution<int> d(1,n); return d(rng)==1; }
-  int i(int lo, int hi) {
-    if (hi < lo) std::swap(lo, hi);
-    std::uniform_int_distribution<int> d(lo, hi);
-    return d(rng);
+  uint64_t state;
+  Rng(uint32_t seed=0xC0FFEEu) {
+    state = (uint64_t)seed * 0x9E3779B97F4A7C15ull + 0xD1B54A32D192ED03ull;
+    if (state == 0) state = 0xC0FFEEull;
+    u32(); u32();  // scramble away from the seed
   }
-
+  uint32_t u32() {
+    state ^= state >> 12;
+    state ^= state << 25;
+    state ^= state >> 27;
+    return (uint32_t)((state * 0x2545F4914F6CDD1Dull) >> 32);
+  }
+  // Inclusive [a,b] like the old uniform_int_distribution behavior.
+  int irange(int a,int b){
+    if (b < a) std::swap(a, b);
+    uint32_t span = (uint32_t)(b - a) + 1u;
+    return a + (int)(((uint64_t)u32() * (uint64_t)span) >> 32);
+  }
+  float u01(){ return (float)(u32() >> 8) * (1.0f / 16777216.0f); }
+  bool oneIn(int n){ return n <= 1 ? true : irange(1, n) == 1; }
+  int i(int lo, int hi) { return irange(lo, hi); }
 };
 
 enum Mood : uint8_t { MOOD_CALM=0, MOOD_CURIOUS, MOOD_HUNGRY, MOOD_THIRSTY, MOOD_FEARFUL, MOOD_ENRAGED, MOOD_EUPHORIC };
@@ -328,6 +348,8 @@ enum ModDest : int {
   DEST_PORTA_V0=4,
   DEST_PORTA_V1=5,
   DEST_PORTA_V2=6,
+  DEST_MIDI_CC=7,   // arbitrary CC on the external MIDI port (slot's cc field)
+  DEST_COUNT=8
 };
 
 static inline const char* modDestName(int d){
@@ -338,6 +360,7 @@ static inline const char* modDestName(int d){
     case DEST_PORTA_V0: return "Porta V0";
     case DEST_PORTA_V1: return "Porta V1";
     case DEST_PORTA_V2: return "Porta V2";
+    case DEST_MIDI_CC: return "MIDI CC";
     default: return "None";
   }
 }
@@ -349,9 +372,20 @@ struct ModMap {
   float smooth=0.20f; // 0..0.98
   float state=0.0f;
   bool enabled=false;
+  int cc=1;           // DEST_MIDI_CC only: which controller to drive (0..127)
 };
 static constexpr int MOD_SLOTS=12;
 inline ModMap g_modMap[MOD_SLOTS];
+
+// True when any enabled mod-matrix slot targets `dest`. Used to give the
+// matrix full authority over a destination: the built-in animated automation
+// must yield instead of overwriting the matrix's CC values.
+inline bool modMapControls(int dest) {
+  for (int i = 0; i < MOD_SLOTS; ++i) {
+    if (g_modMap[i].enabled && g_modMap[i].dest == dest) return true;
+  }
+  return false;
+}
 inline int g_g_modScroll = 0;
 inline int g_g_mmSel = 0;
 inline int g_g_mmField = 0;
@@ -362,6 +396,8 @@ inline float g_cc11Expr = 1.0f;
 inline float g_cc74Bright = 0.5f;
 inline float g_pan01 = 0.5f;
 inline float g_porta01[NUM_VOICES] = {0.f, 0.f, 0.f};
+// Per-slot outputs for DEST_MIDI_CC (0..1); -1 = slot inactive this pass.
+inline float g_modCC01[MOD_SLOTS] = {-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1};
 
 
 
@@ -376,6 +412,7 @@ const char* seasonName(Season season);
 const char* speciesName(uint8_t s);
 const char* biomeName(Biome b);
 BiomeWeights weightsFor(Biome b);
+BiomeWeights lerpBiomeWeights(const BiomeWeights& a, const BiomeWeights& b, float t);
 void initClouds(Clouds& c, Rng& r, Biome b);
 float clamp01(float v);
 char waterFlowGlyph(const World& w, int x, int y, int tick);

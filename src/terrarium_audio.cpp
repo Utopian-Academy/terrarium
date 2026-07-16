@@ -6,8 +6,14 @@ int cc127f(float x){
   return (int)std::lround(x * 127.f);
 }
 
+// The note/CC engine also runs when only external MIDI is active, so
+// Terrarium can "play" an external instrument with no internal synth at all.
+static inline bool audioActive(const SynthOut& synth) {
+  return synth.enabled || (g_midiMirror && g_midiMirror->enabled);
+}
+
 void applyVoiceMixer(SynthOut& synth){
-  if (!synth.enabled) return;
+  if (!audioActive(synth)) return;
   for (int v=0; v<NUM_VOICES; ++v){
     int ch = v;
     float f = g_voiceMute[v] ? 0.f : g_voiceFader[v];
@@ -90,8 +96,10 @@ static inline ViewAudioMetrics computeViewAudioMetrics(const World& w) {
   int agentsHere = 0;
   float cx = 0.f;
   float speedAccum = 0.f;
-  static std::vector<std::pair<int,int>> s_prevPos; // sized lazily
-  if (s_prevPos.size() != w.agents.size()) s_prevPos.assign(w.agents.size(), { -9999, -9999 });
+  // Keyed by agent id: indices shift when agents die, which used to attribute
+  // one agent's motion to another for a tick.
+  static std::unordered_map<int, std::pair<int,int>> s_prevPos;
+  if (s_prevPos.size() > w.agents.size() * 2 + 16) s_prevPos.clear();
 
   for (size_t i=0;i<w.agents.size();++i) {
     const auto& a = w.agents[i];
@@ -99,11 +107,12 @@ static inline ViewAudioMetrics computeViewAudioMetrics(const World& w) {
     agentsHere++;
     cx += (float)(a.x - x0) / (float)std::max(1, viewW-1);
 
-    auto [px,py] = s_prevPos[i];
-    if (px != -9999) {
-      speedAccum += (float)(std::abs(a.x - px) + std::abs(a.y - py));
+    auto it = s_prevPos.find(a.id);
+    if (it != s_prevPos.end()) {
+      speedAccum += (float)(std::abs(a.x - it->second.first) +
+                            std::abs(a.y - it->second.second));
     }
-    s_prevPos[i] = {a.x,a.y};
+    s_prevPos[a.id] = {a.x, a.y};
   }
   if (agentsHere > 0) {
     out.centroidX01 = std::clamp(cx / (float)agentsHere, 0.f, 1.f);
@@ -150,7 +159,7 @@ static inline ViewAudioMetrics computeViewAudioMetrics(const World& w) {
 // Applies animated expression (CC11) and subtle pan (CC10) so sound follows what's happening on screen.
 // CC7 stays your manual fader (the "mixer"). CC11 is automation (movement / activity).
 static inline void applyAnimatedAutomation(SynthOut& synth, const World& w, int tick) {
-  if (!synth.enabled) return;
+  if (!audioActive(synth)) return;
 
   const ViewAudioMetrics m = computeViewAudioMetrics(w);
 
@@ -176,14 +185,14 @@ static inline void applyAnimatedAutomation(SynthOut& synth, const World& w, int 
   g_noteLenAutoMul = std::clamp((1.20f - 0.55f*busy), 0.45f, 1.35f);
   g_holdChanceAutoMul = std::clamp((1.15f - 0.85f*busy), 0.30f, 1.25f);
 
-  // Pan (subtle): center of activity in the view
-#ifdef USE_FLUIDSYNTH
-  if ((tick & 3) == 0) { // CC throttling
+  // Pan (subtle): center of activity in the view. When the mod matrix has an
+  // enabled slot targeting pan, it owns CC10 — don't fight it here. Routed
+  // through synth.cc() so it also mirrors to the external MIDI port.
+  if ((tick & 3) == 0 && !modMapControls(DEST_PAN)) { // CC throttling
     int pan = (int)std::lround(std::clamp(m.centroidX01, 0.f, 1.f) * 127.f);
-    for (int v=0; v<NUM_VOICES; ++v) fluid_synth_cc(synth.synth, v, 10, pan);
-    fluid_synth_cc(synth.synth, 9, 10, pan);
+    for (int v=0; v<NUM_VOICES; ++v) synth.cc(v, 10, pan);
+    synth.cc(9, 10, pan);
   }
-#endif
 
   // Push mixer CCs occasionally (expression changes over time)
   if ((tick & 1) == 0) applyVoiceMixer(synth);
@@ -235,6 +244,9 @@ static inline void gatedNoteOn(SynthOut& synth, Rng& r, int ch, int note, int ve
   float fader = 1.f;
   if (ch >= 0 && ch < NUM_VOICES) fader = g_voiceMute[ch] ? 0.f : g_voiceFader[ch];
   else if (ch == 9) fader = g_drumsMute ? 0.f : g_drumsFader;
+  // A muted voice sends nothing — clamping to velocity 1 used to leak ghost
+  // notes to external MIDI instruments.
+  if (fader <= 0.0001f) return;
   vel = (int)std::lround((float)vel * std::clamp(fader, 0.f, 2.f));
   vel = std::clamp(vel, 1, 127);
   synth.noteOn(ch, note, vel);
@@ -252,15 +264,19 @@ void synthTickMusic(SynthOut& synth, const World& world, Rng& r, int tick,
                     int rootKey, ScaleType scaleType,
                     const std::vector<MidiParam>& params)
 {
-  if (!synth.enabled) return;
+  if (!audioActive(synth)) return;
   // Always service scheduled note-offs first (prevents stuck/overlong notes)
   serviceScheduledNoteOffs(synth, tick);
 
   // Per-tick CC automation (expression/brightness/pan/portamento) driven by MODMAP
   // CC7 faders are set in applyVoiceMixer (menu changes); CC11 is animated here.
+  // When the mod matrix targets CC11, it takes over expression outright
+  // (otherwise it could only attenuate the animated automation value).
+  const bool matrixOwnsExpr = modMapControls(DEST_CC11_EXPR);
   for (int v=0; v<NUM_VOICES; ++v){
     int ch=v;
-    float expr = std::clamp(g_voiceMute[v]?0.f:(g_voiceAuto[v]*g_cc11Expr), 0.f, 1.f);
+    float autoPart = matrixOwnsExpr ? 1.0f : g_voiceAuto[v];
+    float expr = std::clamp(g_voiceMute[v]?0.f:(autoPart*g_cc11Expr), 0.f, 1.f);
     int cc11 = cc127f(expr);
     if (g_lastCC11[v] != cc11) { synth.cc(ch, 11, cc11); g_lastCC11[v]=cc11; }
 
@@ -321,19 +337,19 @@ void synthTickMusic(SynthOut& synth, const World& world, Rng& r, int tick,
   float instr01 = getMidiParam01(params, MIDI_PARAM_INSTR, 0.0f);
   bool instrExplicit = instr01 > 0.01f;
 
+  // Route program changes through g_voice[0].program so the cached per-voice
+  // sender above stays the single writer of channel 0's program (previously
+  // this sent its own program_change and the two caches could disagree).
   auto applyProgram = [&](int prog){
-#ifdef USE_FLUIDSYNTH
     if (prog != currentProgram) {
-      fluid_synth_program_change(synth.synth, 0, prog);
+      g_voice[0].program = std::clamp(prog, 0, 127);
       currentProgram = prog;
     }
-#else
-    (void)prog;
-#endif
   };
 
-  // Auto-switch rarely based on sim state, but only when not explicitly overridden.
-  if (!instrExplicit && tick >= nextAutoChangeTick) {
+  // Auto-switch rarely based on sim state, but only when not explicitly
+  // overridden — by the Instr knob or by a manual V0 program edit.
+  if (!instrExplicit && !g_voiceProgManual[0] && tick >= nextAutoChangeTick) {
     // Spread changes out; slightly more likely during storms or when big sea life is around.
     int waterTiles = 0, whales = 0;
     for (int yy = 0; yy < H; ++yy) for (int xx = 0; xx < W; ++xx) {

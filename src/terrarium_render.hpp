@@ -13,7 +13,9 @@ struct Layout {
   int simHpx = 0;
 };
 
-Layout computeLayout(SDL_Renderer* ren);
+// showHud=false collapses the bottom HUD strip so the world fills the window
+// (used when the menu overlay is hidden).
+Layout computeLayout(SDL_Renderer* ren, bool showHud = true);
 
 struct GlyphCache {
   std::unordered_map<unsigned char, SDL_Texture*> tex;

@@ -1,5 +1,6 @@
 #include "terrarium_app.hpp"
 
+#include "terrarium_patch.hpp"
 #include "terrarium_render.hpp"
 #include "terrarium_version.hpp"
 
@@ -37,21 +38,6 @@ std::string defaultSf2Path() {
   }
   return std::string();
 #endif
-}
-
-std::vector<MidiParam> makeDefaultMidiParams() {
-  return {
-      {MIDI_PARAM_WATER, "Water", 20, 1.0f, 0.0f, 0.0f, -1.0f},
-      {MIDI_PARAM_RAIN, "Rain", 21, 1.0f, 0.0f, 0.0f, -1.0f},
-      {MIDI_PARAM_WIND, "Wind", 22, 1.0f, 0.0f, 0.0f, -1.0f},
-      {MIDI_PARAM_SEASON, "Season", 23, 0.6f, 0.0f, 0.0f, -1.0f},
-      {MIDI_PARAM_BIOME, "Biome", 24, 0.6f, 0.0f, 0.0f, -1.0f},
-      {MIDI_PARAM_FLORA, "Flora", 25, 1.0f, 0.0f, 0.0f, -1.0f},
-      {MIDI_PARAM_FAUNA, "Fauna", 26, 1.0f, 0.0f, 0.0f, -1.0f},
-      {MIDI_PARAM_INSTR, "Instr", 27, 1.0f, 0.0f, 0.0f, -1.0f},
-      {MIDI_PARAM_AUTOKEY, "AutoKey", 28, 1.0f, 1.0f, 1.0f, -1.0f},
-      {MIDI_PARAM_AUTOSCALE, "AutoScale", 29, 1.0f, 1.0f, 1.0f, -1.0f},
-  };
 }
 
 int menuSelectionCount(bool showMenu, int menuPage,
@@ -100,6 +86,7 @@ void adjustChaosWeight(int menuSel, float delta) {
 
   const int sel = clampi(menuSel, 0, kChaosWeightRowCount - 1);
   *rows[sel] = std::clamp(*rows[sel] + delta, kMin[sel], kMax[sel]);
+  g_patchDirty = true;
 }
 
 void adjustVoiceSettings(int menuSel, int delta) {
@@ -119,6 +106,7 @@ void adjustVoiceSettings(int menuSel, int delta) {
   if (g_voice[voice].maxNote < g_voice[voice].minNote) {
     g_voice[voice].maxNote = g_voice[voice].minNote;
   }
+  g_patchDirty = true;
 }
 
 void adjustMixerLevel(SynthOut& synth, int menuSel, float delta) {
@@ -135,6 +123,7 @@ void adjustMixerLevel(SynthOut& synth, int menuSel, float delta) {
     if (g_drumsFader <= kMixerMuteThreshold) g_drumsMute = true;
   }
 
+  g_patchDirty = true;
   applyVoiceMixer(synth);
 }
 
@@ -146,6 +135,7 @@ void toggleMixerMuteSelection(SynthOut& synth, int menuSel) {
   } else {
     g_drumsMute = !g_drumsMute;
   }
+  g_patchDirty = true;
   applyVoiceMixer(synth);
 }
 
@@ -199,9 +189,25 @@ void stepSimulationOnce(World& world, Rng& r, std::string& banner, int& tick,
   tick++;
   synthTickMusic(synth, world, r, tick, heldNote, heldNote2, heldNote3,
                  rootKey, scaleType, params);
+  // synthTickMusic consumes step events only when the synth is enabled and it
+  // reaches the micro-event block; drain here so the queue can never grow
+  // without bound when audio is off.
+  g_stepEvents.clear();
 }
 
 void advanceBiomeFade(World& world, Rng& r) {
+  // Gradually blend growth weights toward the target biome after a morph.
+  // Without this, pressing B changed the biome label but the world kept
+  // growing with the old biome's weights until the next reseed.
+  if (world.biomeMorphActive) {
+    world.biomeMorphT = std::min(1.0f, world.biomeMorphT + 0.0025f);
+    world.bw = lerpBiomeWeights(world.bwFrom, world.bwTo, world.biomeMorphT);
+    if (world.biomeMorphT >= 1.0f) {
+      world.biomeMorphActive = false;
+      world.bw = world.bwTo;
+    }
+  }
+
   if (world.biomeFadeDir == 0) return;
 
   world.biomeFade += 0.02f * (float)world.biomeFadeDir;
@@ -271,76 +277,6 @@ std::string buildWindowTitle(const World& world, int tick, bool paused, int tps,
          std::to_string((int)(world.weather.rainStrength * 100)) + "%)" +
          " | wind " + std::to_string(world.wind.strength) + " | " + banner +
          " | SPACE pause  . step  [ ] speed  r reset  F11 fullscreen  ESC quit";
-}
-
-TelemetrySnapshot collectTelemetry(const World& world, int tick) {
-  TelemetrySnapshot telemetry{};
-  telemetry.windMag =
-      std::min(1.0f,
-               (std::abs((float)world.wind.dx) +
-                std::abs((float)world.wind.dy)) /
-                   6.0f);
-  telemetry.rain01 = clamp01(world.weather.rainStrength);
-
-  constexpr int kSampleStep = 4;
-  int waterSum = 0;
-  int waterCount = 0;
-  int floraCount = 0;
-  int faunaCount = 0;
-  int cellCount = 0;
-  for (int y = 0; y < H; y += kSampleStep) {
-    for (int x = 0; x < W; x += kSampleStep) {
-      waterSum += (int)world.water[y][x];
-      waterCount++;
-      char terrain = world.terrain[y][x];
-      char entity = world.entities[y][x];
-      if (terrain != '.' && terrain != '^' && terrain != ' ') floraCount++;
-      if (entity != ' ') faunaCount++;
-      cellCount++;
-    }
-  }
-
-  telemetry.water01 =
-      clamp01((waterCount ? (float)waterSum / (float)waterCount : 0.0f) / 8.0f);
-  telemetry.flora01 =
-      clamp01(cellCount ? (float)floraCount / (float)cellCount : 0.0f);
-  telemetry.fauna01 =
-      clamp01(cellCount ? (float)faunaCount / (float)cellCount : 0.0f);
-  telemetry.season01 = (float)((int)seasonAt(tick)) / 3.0f;
-  telemetry.biome01 = (float)((int)world.biome) / 5.0f;
-  return telemetry;
-}
-
-void refreshMidiParamValues(std::vector<MidiParam>& params) {
-  for (auto& param : params) {
-    param.value01 = clamp01(param.rawValue01 * param.weight);
-  }
-}
-
-void updateTelemetryParams(std::vector<MidiParam>& params,
-                           const TelemetrySnapshot& telemetry) {
-  if (params.size() > MIDI_PARAM_WATER) {
-    params[MIDI_PARAM_WATER].rawValue01 = telemetry.water01;
-  }
-  if (params.size() > MIDI_PARAM_RAIN) {
-    params[MIDI_PARAM_RAIN].rawValue01 = telemetry.rain01;
-  }
-  if (params.size() > MIDI_PARAM_WIND) {
-    params[MIDI_PARAM_WIND].rawValue01 = telemetry.windMag;
-  }
-  if (params.size() > MIDI_PARAM_SEASON) {
-    params[MIDI_PARAM_SEASON].rawValue01 = telemetry.season01;
-  }
-  if (params.size() > MIDI_PARAM_BIOME) {
-    params[MIDI_PARAM_BIOME].rawValue01 = telemetry.biome01;
-  }
-  if (params.size() > MIDI_PARAM_FLORA) {
-    params[MIDI_PARAM_FLORA].rawValue01 = telemetry.flora01;
-  }
-  if (params.size() > MIDI_PARAM_FAUNA) {
-    params[MIDI_PARAM_FAUNA].rawValue01 = telemetry.fauna01;
-  }
-  refreshMidiParamValues(params);
 }
 
 void sendChangedMidiParams(MidiOut& midi, std::vector<MidiParam>& params,

@@ -435,25 +435,27 @@ void renderModMapMenuPage(SDL_Renderer* renderer, GlyphCache& textGlyphs, int x,
   y += kMenuHeaderStepPx * scale;
 
   g_g_mmSel = clampi(g_g_mmSel, 0, MOD_SLOTS - 1);
-  g_g_mmField = clampi(g_g_mmField, 0, 3);
+  g_g_mmField = clampi(g_g_mmField, 0, 4);
   for (int i = 0; i < MOD_SLOTS; ++i) {
     const ModMap& mapping = g_modMap[i];
+    char destBuf[24];
+    if (mapping.dest == DEST_MIDI_CC) {
+      std::snprintf(destBuf, sizeof(destBuf), "MIDI CC%03d", mapping.cc);
+    } else {
+      std::snprintf(destBuf, sizeof(destBuf), "%s", modDestName(mapping.dest));
+    }
     char buf[196];
     std::snprintf(buf, sizeof(buf), "%2d %c src:%02d %-12s amt:%+0.2f sm:%0.2f",
-                  i, mapping.enabled ? '*' : ' ', mapping.src,
-                  modDestName(mapping.dest), mapping.amt, mapping.smooth);
+                  i, mapping.enabled ? '*' : ' ', mapping.src, destBuf,
+                  mapping.amt, mapping.smooth);
     drawMenuLine(renderer, textGlyphs, x,
                  y + i * kMenuListRowStepPx * scale, buf,
                  i == g_g_mmSel ? RGB{255, 255, 220} : RGB{200, 200, 220},
                  scale);
 
     if (i == g_g_mmSel) {
-      int caretX = x + (g_g_mmField == 0
-                            ? 30
-                            : (g_g_mmField == 1 ? 92
-                                                : (g_g_mmField == 2 ? 170
-                                                                    : 230))) *
-                           scale / 2;
+      static const int kFieldCaretX[5] = {30, 92, 170, 230, 120};
+      int caretX = x + kFieldCaretX[g_g_mmField] * scale / 2;
       drawMenuLine(renderer, textGlyphs, caretX,
                    y + i * kMenuListRowStepPx * scale, "^",
                    RGB{255, 220, 120}, scale);
@@ -462,7 +464,8 @@ void renderModMapMenuPage(SDL_Renderer* renderer, GlyphCache& textGlyphs, int x,
 
   drawMenuLine(renderer, textGlyphs, x,
                y + MOD_SLOTS * kMenuListRowStepPx * scale + 4 * scale,
-               "Map MODS -> CC11/CC74/Pan/Porta. Values are bipolar & spiky.",
+               "Map MODS -> CC11/CC74/Pan/Porta/MIDI CC (any external knob "
+               "via MIDI-learn). 5th field = CC number.",
                RGB{150, 200, 255}, scale, 220);
 }
 

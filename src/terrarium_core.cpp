@@ -8,6 +8,7 @@ static inline float smooth1(float cur,float tgt,float s){
 void applyModMatrix(){
   g_cc11Expr=1.0f; g_cc74Bright=0.5f; g_pan01=0.5f;
   for(int v=0; v<NUM_VOICES; ++v) g_porta01[v]=0.0f;
+  for(int i=0;i<MOD_SLOTS;++i) g_modCC01[i]=-1.0f;
 
   for(int i=0;i<MOD_SLOTS;++i){
     auto& mm=g_modMap[i];
@@ -25,6 +26,7 @@ void applyModMatrix(){
       case DEST_PORTA_V0: g_porta01[0]=std::clamp(0.5f+0.5f*v,0.0f,1.0f); break;
       case DEST_PORTA_V1: g_porta01[1]=std::clamp(0.5f+0.5f*v,0.0f,1.0f); break;
       case DEST_PORTA_V2: g_porta01[2]=std::clamp(0.5f+0.5f*v,0.0f,1.0f); break;
+      case DEST_MIDI_CC:  g_modCC01[i]=std::clamp(0.5f+0.5f*v,0.0f,1.0f); break;
       default: break;
     }
   }
@@ -158,7 +160,7 @@ const char* biomeName(Biome b) {
   return "meadow";
 }
 
-static inline BiomeWeights lerpBiomeWeights(const BiomeWeights& a, const BiomeWeights& b, float t){
+BiomeWeights lerpBiomeWeights(const BiomeWeights& a, const BiomeWeights& b, float t){
   BiomeWeights o;
   o.pondDensity     = a.pondDensity     + (b.pondDensity     - a.pondDensity)     * t;
   o.stoneChance     = a.stoneChance     + (b.stoneChance     - a.stoneChance)     * t;
@@ -1193,6 +1195,12 @@ static void stepTerrain(World& w, Rng& r, Season s, int tick) {
 
   float rainBoost = (w.weather.state==RAIN || w.weather.state==STORM) ? (1.0f + 0.7f*w.weather.rainStrength) : 1.0f;
 
+  // Fire is rare; skip the per-cell ignite neighbor scan entirely on the
+  // (vast majority of) ticks where nothing is burning.
+  bool anyFire = false;
+  for (int y=0; y<H && !anyFire; ++y)
+    anyFire = (w.terrain[y].find('*') != std::string::npos);
+
   for (int y=0; y<H; ++y) for (int x=0; x<W; ++x) {
     if (w.water[y][x] > 0) {
       if (w.terrain[y][x] == '*') next[y][x] = 'x';
@@ -1225,7 +1233,7 @@ static void stepTerrain(World& w, Rng& r, Season s, int tick) {
       continue;
     }
 
-    if (isVeg(c)) {
+    if (anyFire && isVeg(c)) {
       bool ignite = false;
       for (int dy=-1; dy<=1 && !ignite; ++dy) for (int dx=-1; dx<=1 && !ignite; ++dx) {
         if (dx==0 && dy==0) continue;
@@ -1245,16 +1253,26 @@ static void stepTerrain(World& w, Rng& r, Season s, int tick) {
       if (ignite) { next[y][x]='*'; continue; }
     }
 
-    int wet = countNeighborsWater(w.water, x, y);
-    int g   = countNeighborsChar(w.terrain, x, y, ',');
-    int tg  = countNeighborsChar(w.terrain, x, y, '"');
-    int sh  = countNeighborsChar(w.terrain, x, y, '#');
-    int tr  = countNeighborsChar(w.terrain, x, y, 'T') + countNeighborsChar(w.terrain, x, y, 'Y') + countNeighborsChar(w.terrain, x, y, 'P');
-    int flo = countNeighborsChar(w.terrain, x, y, 'f') + countNeighborsChar(w.terrain, x, y, '+') +
-              countNeighborsChar(w.terrain, x, y, '&') + countNeighborsChar(w.terrain, x, y, '!') +
-              countNeighborsChar(w.terrain, x, y, '$');
-    int fern= countNeighborsChar(w.terrain, x, y, ';');
-    int reeds=countNeighborsChar(w.terrain, x, y, ':');
+    // One pass over the 8 neighbors, bucketing by glyph. This used to be 12
+    // separate countNeighborsChar() calls (~96 probes per cell) and dominated
+    // the whole tick (~87% of step() in gprof).
+    int wet=0, g=0, tg=0, sh=0, tr=0, flo=0, fern=0, reeds=0;
+    for (int dy=-1; dy<=1; ++dy) for (int dx=-1; dx<=1; ++dx) {
+      if (dx==0 && dy==0) continue;
+      int nx=x+dx, ny=y+dy;
+      if (!inBounds(nx,ny)) continue;
+      if (w.water[ny][nx] > 0) wet++;
+      switch (w.terrain[ny][nx]) {
+        case ',': g++; break;
+        case '"': tg++; break;
+        case '#': sh++; break;
+        case 'T': case 'Y': case 'P': tr++; break;
+        case 'f': case '+': case '&': case '!': case '$': flo++; break;
+        case ';': fern++; break;
+        case ':': reeds++; break;
+        default: break;
+      }
+    }
 
     if (c=='.') {
       int fert = wet*3 + g + tg + flo + fern;
@@ -1595,7 +1613,7 @@ static void applyRippleChaos(World& w, Rng& r, int tick) {
       if (r.u01() < 0.25f * p) {
         int depth = (int)w.water[y][x];
         depth += (r.oneIn(2) ? 1 : -1);
-        w.water[y][x] = (uint8_t)clampi(depth, 0, 9);
+        w.water[y][x] = (uint8_t)clampi(depth, 0, 7);
       }
       if (r.u01() < 0.18f * p) {
         static const char kOverlayChoices[] = {'~', '`', '*', '+', ';', '"', ':', '.'};
@@ -1645,6 +1663,50 @@ static inline void moveRandom(Rng& r,int &x,int &y){
   int k=r.irange(0,7);
   x+=dirs[k][0]; y+=dirs[k][1];
 }
+// Occasional immigration keeps the ecosystem alive: without it the only
+// agents that ever exist are the legendary couple (deaths are never replaced).
+static void maybeImmigrateAgents(World& w, Rng& r) {
+  const int cap = (W * H) / 300;
+  if ((int)w.agents.size() >= cap) return;
+
+  int denom = (int)std::max(2.0f, 8.0f / std::max(0.1f, g_alea.spawnChance));
+  if (!r.oneIn(denom)) return;
+
+  // Pick a behavior glyph: mostly grazers, some birds, a few predators,
+  // fish when we land on water.
+  char glyph = 'r';
+  float u = r.u01();
+  if (u < 0.15f) glyph = 'n';
+  else if (u < 0.32f) glyph = 'v';
+
+  for (int tries = 0; tries < 60; ++tries) {
+    // Arrive from a world edge like a real migrant.
+    int side = r.irange(0, 3);
+    int x = (side == 0) ? 0 : (side == 1) ? W - 1 : r.irange(0, W - 1);
+    int y = (side == 2) ? 0 : (side == 3) ? H - 1 : r.irange(0, H - 1);
+
+    uint8_t depth = w.water[y][x];
+    char resolved = glyph;
+    if (depth > 2) resolved = (r.oneIn(2) ? '>' : '<');  // deep water: fish
+    else if (depth > 0 && !isBird(glyph)) continue;      // shallows: birds only
+    if (!cellPassableForAgent(w, x, y)) continue;
+
+    Agent a;
+    a.id = w.agents.empty() ? 1 : (w.agents.back().id + 1);
+    a.x = x;
+    a.y = y;
+    a.glyph = resolved;
+    a.species = pickBiomeSpecies(w.biome, r);
+    a.hunger = r.u01() * 0.4f;
+    a.thirst = r.u01() * 0.4f;
+    a.fatigue = r.u01() * 0.3f;
+    a.stress = r.u01() * 0.2f;
+    a.health = 0.85f + r.u01() * 0.15f;
+    w.agents.push_back(a);
+    return;
+  }
+}
+
 static void stepEntities(World& w, Rng& r, int tick) {
   // One-time migration: if agents list is empty, seed it from the existing entity glyph grid.
   if (w.agents.empty()) agentsInitFromGrid(w, r);
@@ -1654,6 +1716,7 @@ static void stepEntities(World& w, Rng& r, int tick) {
   bool doUpdate = (tick % 6) == 0;
 
   if (doUpdate) {
+    maybeImmigrateAgents(w, r);
     for (auto &a : w.agents) {
       // Baseline needs
       float dt = 0.1f; // ~100ms
@@ -1869,9 +1932,19 @@ static void stepEntities(World& w, Rng& r, int tick) {
       }
     }
 
-    // Cull dead agents (and clear their glyph)
+    // Cull dead agents (and clear their glyph). The inspected agent is
+    // tracked by index, so re-find it by id after the erase shifts indices.
+    int inspectId = -1;
+    if (g_inspectIdx >= 0 && g_inspectIdx < (int)w.agents.size())
+      inspectId = w.agents[g_inspectIdx].id;
     w.agents.erase(std::remove_if(w.agents.begin(), w.agents.end(),
       [&](const Agent& a){ return a.health <= 0.01f; }), w.agents.end());
+    if (inspectId >= 0) {
+      g_inspectIdx = -1;
+      for (int i = 0; i < (int)w.agents.size(); ++i) {
+        if (w.agents[i].id == inspectId) { g_inspectIdx = i; break; }
+      }
+    }
   }
 
   agentsWriteToGrid(w, tick);

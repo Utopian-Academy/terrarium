@@ -125,18 +125,110 @@ struct TelemetrySnapshot {
 
 struct MidiEvent { int note=60; int vel=90; int durTicks=24; int startTick=0; };
 
-// Linux: no-op MIDI backend (Windows will use WinMM later).
-struct MidiOut {
+// MIDI output backend.
+// Linux: real ALSA sequencer port ("Terrarium MIDI OUT") — connect it to any
+// synth/host (e.g. a VST host running Serum) with aconnect / qjackctl / your
+// DAW, then every note, CC line, and mod-matrix CC Terrarium generates plays
+// that instrument. Falls back to a no-op stub without TERRARIUM_HAS_ALSA.
+#ifdef TERRARIUM_HAS_ALSA
+  #include <alsa/asoundlib.h>
+#endif
+
+// Abstract MIDI event sink. The standalone app's sink is the ALSA MidiOut
+// below; the plugin build provides its own sink that queues events into the
+// host. All engine note/CC traffic is mirrored to g_midiMirror when set.
+struct MidiSink {
   bool enabled=false;
+  virtual ~MidiSink() = default;
+  virtual void sendNoteOn(int ch, int note, int vel) = 0;
+  virtual void sendNoteOff(int ch, int note, int vel) = 0;
+  virtual void sendCC(int ch, int cc, int val) = 0;
+};
+
+struct MidiOut : MidiSink {
+#ifdef TERRARIUM_HAS_ALSA
+  snd_seq_t* seq=nullptr;
+  int port=-1;
+
+  bool open(int /*deviceIndex*/) {
+    if (seq) return true;
+    if (snd_seq_open(&seq, "default", SND_SEQ_OPEN_OUTPUT, 0) < 0) {
+      seq = nullptr;
+      return false;
+    }
+    snd_seq_set_client_name(seq, "Terrarium");
+    port = snd_seq_create_simple_port(
+        seq, "Terrarium MIDI OUT",
+        SND_SEQ_PORT_CAP_READ | SND_SEQ_PORT_CAP_SUBS_READ,
+        SND_SEQ_PORT_TYPE_MIDI_GENERIC | SND_SEQ_PORT_TYPE_APPLICATION);
+    if (port < 0) {
+      snd_seq_close(seq);
+      seq = nullptr;
+      return false;
+    }
+    return true;
+  }
+
+  void close() {
+    if (seq) {
+      if (port >= 0) snd_seq_delete_simple_port(seq, port);
+      snd_seq_close(seq);
+    }
+    seq = nullptr;
+    port = -1;
+    enabled = false;
+  }
+
+  void send(snd_seq_event_t& ev) {
+    if (!seq || port < 0) return;
+    snd_seq_ev_set_source(&ev, (unsigned char)port);
+    snd_seq_ev_set_subs(&ev);
+    snd_seq_ev_set_direct(&ev);
+    snd_seq_event_output_direct(seq, &ev);
+  }
+
+  void sendCC(int ch, int cc, int val) override {
+    if (!enabled) return;
+    snd_seq_event_t ev; snd_seq_ev_clear(&ev);
+    snd_seq_ev_set_controller(&ev, ch & 15, cc & 127, val & 127);
+    send(ev);
+  }
+  void sendNoteOn(int ch, int note, int vel) override {
+    if (!enabled) return;
+    snd_seq_event_t ev; snd_seq_ev_clear(&ev);
+    snd_seq_ev_set_noteon(&ev, ch & 15, note & 127, vel & 127);
+    send(ev);
+  }
+  void sendNoteOff(int ch, int note, int vel=0) override {
+    if (!enabled) return;
+    snd_seq_event_t ev; snd_seq_ev_clear(&ev);
+    snd_seq_ev_set_noteoff(&ev, ch & 15, note & 127, vel & 127);
+    send(ev);
+  }
+  void sendRealtime(snd_seq_event_type_t type) {
+    if (!enabled) return;
+    snd_seq_event_t ev; snd_seq_ev_clear(&ev);
+    ev.type = type;
+    send(ev);
+  }
+  void sendClock() { sendRealtime(SND_SEQ_EVENT_CLOCK); }
+  void sendStart() { sendRealtime(SND_SEQ_EVENT_START); }
+  void sendStop()  { sendRealtime(SND_SEQ_EVENT_STOP); }
+#else
   bool open(int /*deviceIndex*/) { enabled=false; return false; }
   void close() {}
-  void sendCC(int /*ch*/, int /*cc*/, int /*val*/) {}
-  void sendNoteOn(int /*ch*/, int /*note*/, int /*vel*/) {}
-  void sendNoteOff(int /*ch*/, int /*note*/, int /*vel*/=0) {}
+  void sendCC(int, int, int) override {}
+  void sendNoteOn(int, int, int) override {}
+  void sendNoteOff(int, int, int) override {}
   void sendClock() {}
   void sendStart() {}
   void sendStop() {}
+#endif
 };
+
+// When set and enabled, all synth note/CC traffic is mirrored out this sink
+// so an external instrument hears exactly what the internal synth plays.
+inline MidiSink* g_midiMirror = nullptr;
 
 
 
@@ -153,6 +245,9 @@ struct MidiOut {
 
 #ifdef USE_FLUIDSYNTH
   #include <fluidsynth.h>
+#endif
+#ifdef TERRARIUM_HAS_PIPEWIRE
+  #include <pipewire/pipewire.h>
 #endif
 
 struct SynthOut {
@@ -175,6 +270,16 @@ bool open(const std::string& sf2Path, float g,
   audioDriver = driverStr;
   audioDevice = deviceStr;
 
+#ifdef TERRARIUM_HAS_PIPEWIRE
+  // FluidSynth's pipewire driver needs pw_init() before any PipeWire API is
+  // touched, or SPA plugin loading fails and the driver silently dies.
+  static bool pipewireInitialized = false;
+  if (!pipewireInitialized) {
+    pw_init(nullptr, nullptr);
+    pipewireInitialized = true;
+  }
+#endif
+
   settings = new_fluid_settings();
   if (!settings) return false;
 
@@ -193,7 +298,8 @@ bool open(const std::string& sf2Path, float g,
   fluid_settings_setnum(settings, "synth.chorus.level",  1.10);
   fluid_settings_setnum(settings, "synth.chorus.speed",  0.20);
   fluid_settings_setnum(settings, "synth.chorus.depth",  9.0);
-  fluid_settings_setint(settings, "synth.chorus.type",   FLUID_CHORUS_MOD_SINE);
+  // NOTE: "synth.chorus.type" was removed from FluidSynth's settings in 2.3.x
+  // and must not be set here (sine is the default modulation shape anyway).
 
   // Keep polyphony modest for delicate bell/chime patches
   fluid_settings_setint(settings, "synth.polyphony", 16);
@@ -239,16 +345,26 @@ void close() {
   enabled=false;
 }
 
-void noteOn(int ch,int note,int vel){ if(enabled) fluid_synth_noteon(synth,ch,note,vel); }
-void noteOff(int ch,int note,int vel=0){ if(enabled) fluid_synth_noteoff(synth,ch,note); (void)vel; }
-void cc(int ch,int cc,int val){ if(enabled) fluid_synth_cc(synth,ch,cc,val); }
+void noteOn(int ch,int note,int vel){
+  if (g_midiMirror) g_midiMirror->sendNoteOn(ch,note,vel);
+  if(enabled) fluid_synth_noteon(synth,ch,note,vel);
+}
+void noteOff(int ch,int note,int vel=0){
+  if (g_midiMirror) g_midiMirror->sendNoteOff(ch,note,vel);
+  if(enabled) fluid_synth_noteoff(synth,ch,note);
+  (void)vel;
+}
+void cc(int ch,int cc,int val){
+  if (g_midiMirror) g_midiMirror->sendCC(ch,cc,val);
+  if(enabled) fluid_synth_cc(synth,ch,cc,val);
+}
 
 #else
   bool open(const std::string&, float, const std::string&, const std::string&){ enabled=false; return false; }
   void close() {}
-  void noteOn(int,int,int) {}
-  void noteOff(int,int,int=0) {}
-  void cc(int,int,int) {}
+  void noteOn(int ch,int note,int vel){ if (g_midiMirror) g_midiMirror->sendNoteOn(ch,note,vel); }
+  void noteOff(int ch,int note,int vel=0){ if (g_midiMirror) g_midiMirror->sendNoteOff(ch,note,vel); }
+  void cc(int ch,int cc,int val){ if (g_midiMirror) g_midiMirror->sendCC(ch,cc,val); }
 #endif
 };
 

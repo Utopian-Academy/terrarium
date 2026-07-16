@@ -3,10 +3,10 @@
 #include "terrarium_ui.hpp"
 #include "terrarium_visuals.hpp"
 
-Layout computeLayout(SDL_Renderer* renderer) {
+Layout computeLayout(SDL_Renderer* renderer, bool showHud) {
   Layout layout;
   SDL_GetRendererOutputSize(renderer, &layout.screenW, &layout.screenH);
-  layout.hudH = std::max(40, layout.screenH / 18);
+  layout.hudH = showHud ? std::max(40, layout.screenH / 18) : 0;
   layout.simHpx = layout.screenH - layout.hudH;
   return layout;
 }
@@ -118,8 +118,49 @@ void render(SDL_Renderer* renderer, const Layout& layout, World& world,
   updateModPool(world, tick, frame.viewW, frame.viewH);
   applyModMatrix();
 
-  renderWorldPass(renderer, layout, world, worldGlyphs, tick, frame);
-  renderHudBackground(renderer, layout);
+  // The world pass costs ~2 SDL calls per cell (~45k/frame). The world only
+  // visually changes on sim ticks, camera moves, or while ripples animate —
+  // so render it into a cached target texture and blit that on quiet frames.
+  static SDL_Texture* worldCache = nullptr;
+  static int cacheW = -1, cacheH = -1;
+  static int lastTick = -1, lastCamX = -1, lastCamY = -1, lastZoom = -1;
+
+  const bool canTarget = SDL_RenderTargetSupported(renderer) == SDL_TRUE;
+  if (canTarget) {
+    if (!worldCache || cacheW != layout.screenW || cacheH != layout.simHpx) {
+      if (worldCache) SDL_DestroyTexture(worldCache);
+      worldCache =
+          SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
+                            SDL_TEXTUREACCESS_TARGET, layout.screenW,
+                            std::max(1, layout.simHpx));
+      cacheW = layout.screenW;
+      cacheH = layout.simHpx;
+      lastTick = -1;
+    }
+  }
+
+  if (canTarget && worldCache) {
+    const bool dirty = tick != lastTick || g_camX != lastCamX ||
+                       g_camY != lastCamY || g_zoom != lastZoom ||
+                       !g_ripples.empty();
+    if (dirty) {
+      SDL_SetRenderTarget(renderer, worldCache);
+      setColor(renderer, 0, 0, 0);
+      SDL_RenderClear(renderer);
+      renderWorldPass(renderer, layout, world, worldGlyphs, tick, frame);
+      SDL_SetRenderTarget(renderer, nullptr);
+      lastTick = tick;
+      lastCamX = g_camX;
+      lastCamY = g_camY;
+      lastZoom = g_zoom;
+    }
+    SDL_Rect dst{0, 0, layout.screenW, layout.simHpx};
+    SDL_RenderCopy(renderer, worldCache, nullptr, &dst);
+  } else {
+    renderWorldPass(renderer, layout, world, worldGlyphs, tick, frame);
+  }
+
+  if (layout.hudH > 0) renderHudBackground(renderer, layout);
   if (showMenu) {
     renderMenuOverlay(renderer, layout, world, textGlyphs, menuPage, params,
                       menuSel, synthEnabled, sf2Path, uiLang, frame.season);

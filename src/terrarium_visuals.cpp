@@ -540,6 +540,25 @@ bool tryColorTerrainGlyph(char glyph, uint32_t hash, RGB& color) {
   }
 }
 
+// Agent sprite glyphs live at 0x80 + species*2 + animPhase (see
+// speciesDisplayGlyph). Without this they all fell through to plain white.
+bool tryColorSpeciesGlyph(char glyph, RGB& color) {
+  unsigned char uc = (unsigned char)glyph;
+  if (uc < 0x80u || uc >= 0x80u + SPEC_COUNT * 2u) return false;
+  switch ((uc - 0x80u) / 2u) {
+    case SPEC_WANDERER:   color = {235, 225, 200}; break;  // warm bone
+    case SPEC_SHELLBACK:  color = {150, 200, 170}; break;  // mossy shell
+    case SPEC_SWARMER:    color = {255, 210, 120}; break;  // amber
+    case SPEC_ENGINEER:   color = {150, 190, 255}; break;  // workshop blue
+    case SPEC_PARASITE:   color = {225, 130, 200}; break;  // sickly magenta
+    case SPEC_PACKHUNTER: color = {255, 140, 110}; break;  // rust red
+    case SPEC_MYSTIC:     color = {190, 150, 255}; break;  // violet
+    case SPEC_TRICKSTER:  color = {140, 255, 220}; break;  // mint
+    default:              color = {235, 235, 235}; break;
+  }
+  return true;
+}
+
 bool tryColorFaunaGlyph(char glyph, RGB& color) {
   switch (glyph) {
     case 'r':
@@ -677,7 +696,8 @@ RGB fgForChar(const World& world, char c, Season season, float seasonBlend,
 
   if (c == '.' || c == ' ') {
     fg = {0, 0, 0};
-  } else if (!tryColorWaterGlyph(world, c, tick, x, y, fg) &&
+  } else if (!tryColorSpeciesGlyph(c, fg) &&
+             !tryColorWaterGlyph(world, c, tick, x, y, fg) &&
              !tryColorFloraGlyph(world, c, hash, fg) &&
              !tryColorTerrainGlyph(c, hash, fg) &&
              !tryColorFaunaGlyph(c, fg)) {

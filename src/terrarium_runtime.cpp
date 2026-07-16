@@ -1,6 +1,7 @@
 #include "terrarium_runtime.hpp"
 
 #include "terrarium_app.hpp"
+#include "terrarium_patch.hpp"
 #include "terrarium_render.hpp"
 #include "terrarium_version.hpp"
 
@@ -11,11 +12,13 @@ struct CliOptions {
   bool startFullscreen = true;
   UiLang uiLang = UI_EN;
   bool wantSynth = false;
+  bool wantMidi = false;
   bool printVersion = false;
   std::string sf2Path = defaultSf2Path();
   float synthGain = 0.7f;
   std::string synthAudioDriver;
   std::string synthAudioDevice;
+  std::string patchPath = defaultPatchPath();
 };
 
 struct RuntimeResources {
@@ -30,6 +33,8 @@ struct RuntimeResources {
   TelemetrySnapshot telemetry;
 
   ~RuntimeResources() {
+    g_midiMirror = nullptr;
+    midi.close();
     worldGlyphs.destroy();
     textGlyphs.destroy();
     if (renderer) SDL_DestroyRenderer(renderer);
@@ -57,6 +62,8 @@ struct LoopState {
   uint32_t lastClockMs = 0;
   uint32_t lastParamSendMs = 0;
   std::chrono::steady_clock::time_point lastFrame =
+      std::chrono::steady_clock::now();
+  std::chrono::steady_clock::time_point lastRippleUpdate =
       std::chrono::steady_clock::now();
 };
 
@@ -97,6 +104,8 @@ CliOptions parseCliOptions(int argc, char** argv) {
       options.startFullscreen = true;
     } else if (std::strcmp(argv[i], "--synth") == 0) {
       options.wantSynth = true;
+    } else if (std::strcmp(argv[i], "--midi") == 0) {
+      options.wantMidi = true;
     } else if (std::strcmp(argv[i], "--sf2") == 0 && i + 1 < argc) {
       options.sf2Path = argv[++i];
       options.wantSynth = true;
@@ -109,6 +118,8 @@ CliOptions parseCliOptions(int argc, char** argv) {
     } else if (std::strcmp(argv[i], "--audio-device") == 0 && i + 1 < argc) {
       options.synthAudioDevice = argv[++i];
       options.wantSynth = true;
+    } else if (std::strcmp(argv[i], "--patch") == 0 && i + 1 < argc) {
+      options.patchPath = argv[++i];
     } else if (std::strcmp(argv[i], "--lang") == 0 && i + 1 < argc) {
       options.uiLang = parseUiLanguage(argv[++i]);
     } else if (std::strcmp(argv[i], "--version") == 0) {
@@ -119,7 +130,8 @@ CliOptions parseCliOptions(int argc, char** argv) {
 }
 
 bool initializeSdl(SdlSession& session) {
-  if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) != 0) {
+  // Video only: FluidSynth owns audio via its own driver (SDL audio unused).
+  if (SDL_Init(SDL_INIT_VIDEO) != 0) {
     std::cerr << "SDL_Init failed: " << SDL_GetError() << "\n";
     return false;
   }
@@ -142,11 +154,13 @@ bool createWindowAndRenderer(const CliOptions& options,
     return false;
   }
 
-  resources.renderer = SDL_CreateRenderer(resources.window, -1,
-                                          SDL_RENDERER_ACCELERATED);
+  resources.renderer = SDL_CreateRenderer(
+      resources.window, -1,
+      SDL_RENDERER_ACCELERATED | SDL_RENDERER_TARGETTEXTURE);
   if (!resources.renderer) {
-    resources.renderer = SDL_CreateRenderer(resources.window, -1,
-                                            SDL_RENDERER_SOFTWARE);
+    resources.renderer = SDL_CreateRenderer(
+        resources.window, -1,
+        SDL_RENDERER_SOFTWARE | SDL_RENDERER_TARGETTEXTURE);
   }
   if (!resources.renderer) {
     std::cerr << "SDL_CreateRenderer failed: " << SDL_GetError() << "\n";
@@ -172,8 +186,13 @@ void initializeSimulation(const CliOptions& options, RuntimeResources& resources
   rng = Rng(seed);
   seedWorld(world, rng, options.biome);
 
-  resources.midi.open(0);
-  resources.midi.enabled = false;
+  if (resources.midi.open(0)) {
+    std::cerr << "[midi] ALSA port 'Terrarium MIDI OUT' created — connect it "
+                 "to your synth/host and press O to start sending.\n";
+  }
+  // Opt-in via the O key, or start sending immediately with --midi.
+  resources.midi.enabled = options.wantMidi;
+  g_midiMirror = &resources.midi;
   resources.params = makeDefaultMidiParams();
   resources.telemetry = collectTelemetry(world, 0);
   updateTelemetryParams(resources.params, resources.telemetry);
@@ -212,12 +231,65 @@ void reseedWorld(uint32_t& seed, Rng& rng, World& world, LoopState& loop) {
   loop.banner = "reset";
 }
 
-void toggleFullscreen(RuntimeResources& resources) {
+void toggleFullscreen(RuntimeResources& resources, bool showHud) {
   Uint32 flags = SDL_GetWindowFlags(resources.window);
   bool fullscreen = (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
   SDL_SetWindowFullscreen(resources.window,
                           fullscreen ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
-  resources.layout = computeLayout(resources.renderer);
+  resources.layout = computeLayout(resources.renderer, showHud);
+}
+
+void setMenuVisible(RuntimeResources& resources, LoopState& loop, bool show) {
+  loop.showMenu = show;
+  resources.layout = computeLayout(resources.renderer, show);
+}
+
+void adjustModMapField(int dir) {
+  g_g_mmSel = clampi(g_g_mmSel, 0, MOD_SLOTS - 1);
+  ModMap& mapping = g_modMap[g_g_mmSel];
+  switch (clampi(g_g_mmField, 0, 4)) {
+    case 0:
+      mapping.src = clampi(mapping.src + dir, 0, MOD_N - 1);
+      break;
+    case 1:
+      mapping.dest = clampi(mapping.dest + dir, DEST_NONE, DEST_COUNT - 1);
+      break;
+    case 2:
+      mapping.amt = std::clamp(mapping.amt + 0.05f * (float)dir, -2.0f, 2.0f);
+      break;
+    case 3:
+      mapping.smooth =
+          std::clamp(mapping.smooth + 0.02f * (float)dir, 0.0f, 0.98f);
+      break;
+    default:
+      mapping.cc = clampi(mapping.cc + dir, 0, 127);
+      break;
+  }
+  g_patchDirty = true;
+}
+
+void handleMenuVertical(LoopState& loop, RuntimeResources& resources,
+                        const World& world, int dir) {
+  const int page = loop.menuPage % kMenuPageCount;
+  if (loop.showMenu && page == 6) {
+    const int agentCount = (int)world.agents.size();
+    if (agentCount > 0) {
+      g_inspectIdx = clampi(g_inspectIdx + dir, 0, agentCount - 1);
+    }
+    return;
+  }
+  if (loop.showMenu && page == 7) {
+    g_g_modScroll = clampi(g_g_modScroll + dir, 0, std::max(0, MOD_N - 14));
+    return;
+  }
+  if (loop.showMenu && page == 8) {
+    g_g_mmSel = (g_g_mmSel + MOD_SLOTS + dir) % MOD_SLOTS;
+    return;
+  }
+  cycleMenuSelection(
+      loop.menuSel,
+      menuSelectionCount(loop.showMenu, loop.menuPage, resources.params, world),
+      dir);
 }
 
 void handleKeyDown(SDL_Keycode key, RuntimeResources& resources, LoopState& loop,
@@ -249,23 +321,20 @@ void handleKeyDown(SDL_Keycode key, RuntimeResources& resources, LoopState& loop
       if (g_zoom > 1 && !loop.showMenu) {
         g_camY -= 2;
         clampCameraToWorld();
-        break;
       }
-      [[fallthrough]];
+      break;
     case SDLK_a:
       if (g_zoom > 1 && !loop.showMenu) {
         g_camX -= 2;
         clampCameraToWorld();
-        break;
       }
-      [[fallthrough]];
+      break;
     case SDLK_d:
       if (g_zoom > 1 && !loop.showMenu) {
         g_camX += 2;
         clampCameraToWorld();
-        break;
       }
-      [[fallthrough]];
+      break;
     case SDLK_PERIOD:
       if (loop.paused) {
         stepSimulationOnce(world, rng, loop.banner, loop.tick, resources.synth,
@@ -283,13 +352,17 @@ void handleKeyDown(SDL_Keycode key, RuntimeResources& resources, LoopState& loop
       reseedWorld(seed, rng, world, loop);
       break;
     case SDLK_F11:
-      toggleFullscreen(resources);
+      toggleFullscreen(resources, loop.showMenu);
+      break;
+    case SDLK_F1:
+      // Universal UI toggle — works even on the MIXER page where M = mute.
+      setMenuVisible(resources, loop, !loop.showMenu);
       break;
     case SDLK_m:
       if (loop.showMenu && (loop.menuPage % kMenuPageCount) == 5) {
         toggleMixerMuteSelection(resources.synth, loop.menuSel);
       } else {
-        loop.showMenu = !loop.showMenu;
+        setMenuVisible(resources, loop, !loop.showMenu);
       }
       break;
     case SDLK_o:
@@ -307,16 +380,27 @@ void handleKeyDown(SDL_Keycode key, RuntimeResources& resources, LoopState& loop
       loop.useSimClock = !loop.useSimClock;
       break;
     case SDLK_UP:
-      cycleMenuSelection(
-          loop.menuSel,
-          menuSelectionCount(loop.showMenu, loop.menuPage, resources.params, world),
-          -1);
+      handleMenuVertical(loop, resources, world, -1);
       break;
     case SDLK_DOWN:
-      cycleMenuSelection(
-          loop.menuSel,
-          menuSelectionCount(loop.showMenu, loop.menuPage, resources.params, world),
-          1);
+      handleMenuVertical(loop, resources, world, 1);
+      break;
+    case SDLK_LEFT:
+      if (loop.showMenu && (loop.menuPage % kMenuPageCount) == 8) {
+        g_g_mmField = (g_g_mmField + 4) % 5;
+      }
+      break;
+    case SDLK_RIGHT:
+      if (loop.showMenu && (loop.menuPage % kMenuPageCount) == 8) {
+        g_g_mmField = (g_g_mmField + 1) % 5;
+      }
+      break;
+    case SDLK_e:
+      if (loop.showMenu && (loop.menuPage % kMenuPageCount) == 8) {
+        g_g_mmSel = clampi(g_g_mmSel, 0, MOD_SLOTS - 1);
+        g_modMap[g_g_mmSel].enabled = !g_modMap[g_g_mmSel].enabled;
+        g_patchDirty = true;
+      }
       break;
     case SDLK_MINUS:
     case SDLK_KP_MINUS:
@@ -326,6 +410,8 @@ void handleKeyDown(SDL_Keycode key, RuntimeResources& resources, LoopState& loop
         adjustVoiceSettings(loop.menuSel, -1);
       } else if (loop.showMenu && (loop.menuPage % kMenuPageCount) == 5) {
         adjustMixerLevel(resources.synth, loop.menuSel, -kParamAdjustStep);
+      } else if (loop.showMenu && (loop.menuPage % kMenuPageCount) == 8) {
+        adjustModMapField(-1);
       } else {
         adjustSelectedParamWeight(resources.params, loop.menuSel,
                                   -kParamAdjustStep);
@@ -339,6 +425,8 @@ void handleKeyDown(SDL_Keycode key, RuntimeResources& resources, LoopState& loop
         adjustVoiceSettings(loop.menuSel, 1);
       } else if (loop.showMenu && (loop.menuPage % kMenuPageCount) == 5) {
         adjustMixerLevel(resources.synth, loop.menuSel, kParamAdjustStep);
+      } else if (loop.showMenu && (loop.menuPage % kMenuPageCount) == 8) {
+        adjustModMapField(1);
       } else {
         adjustSelectedParamWeight(resources.params, loop.menuSel,
                                   kParamAdjustStep);
@@ -346,6 +434,7 @@ void handleKeyDown(SDL_Keycode key, RuntimeResources& resources, LoopState& loop
       break;
     case SDLK_k:
       loop.rootKey = (loop.rootKey + 1) % 12;
+      g_patchDirty = true;
       break;
     case SDLK_s:
       if (loop.showMenu && (loop.menuPage % kMenuPageCount) == 5) {
@@ -357,7 +446,8 @@ void handleKeyDown(SDL_Keycode key, RuntimeResources& resources, LoopState& loop
         clampCameraToWorld();
         break;
       }
-      loop.scaleType = (ScaleType)(((int)loop.scaleType + 1) % 6);
+      loop.scaleType = (ScaleType)(((int)loop.scaleType + 1) % 7);
+      g_patchDirty = true;
       break;
     default:
       break;
@@ -382,7 +472,7 @@ void handleEvent(const SDL_Event& event, RuntimeResources& resources,
       (event.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
        event.window.event == SDL_WINDOWEVENT_RESIZED ||
        event.window.event == SDL_WINDOWEVENT_DISPLAY_CHANGED)) {
-    resources.layout = computeLayout(resources.renderer);
+    resources.layout = computeLayout(resources.renderer, loop.showMenu);
     return;
   }
 
@@ -401,13 +491,19 @@ void handleEvent(const SDL_Event& event, RuntimeResources& resources,
 }
 
 void updateAndRender(RuntimeResources& resources, LoopState& loop, World& world,
-                     Rng& rng, const std::string& sf2Path, UiLang uiLang) {
+                     Rng& rng, const CliOptions& options, UiLang uiLang) {
   auto now = std::chrono::steady_clock::now();
   auto dtMs =
       std::chrono::duration_cast<std::chrono::milliseconds>(now - loop.lastFrame)
           .count();
 
-  updateRipples((float)dtMs / 1000.0f);
+  // Ripples advance on real frame time; lastFrame only advances on sim ticks,
+  // so it must not be reused here or ripples age many times too fast.
+  auto rippleDtMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        now - loop.lastRippleUpdate)
+                        .count();
+  loop.lastRippleUpdate = now;
+  updateRipples((float)rippleDtMs / 1000.0f);
   const int msPerTick = 1000 / std::max(1, loop.tps);
 
   advanceBiomeFade(world, rng);
@@ -431,15 +527,28 @@ void updateAndRender(RuntimeResources& resources, LoopState& loop, World& world,
   uint32_t nowMs = SDL_GetTicks();
   sendChangedMidiParams(resources.midi, resources.params, nowMs,
                         loop.lastParamSendMs);
+  sendModMatrixMidi(resources.midi);
   pumpMidiClock(resources.midi, loop.midiClockOut, loop.useSimClock,
                 resources.telemetry, nowMs, loop.lastClockMs);
+
+  // Debounced patch autosave so edits survive a crash, not just clean quits.
+  if (g_patchDirty) {
+    static uint32_t lastPatchSaveMs = 0;
+    if (nowMs - lastPatchSaveMs > 1500) {
+      savePatch(options.patchPath, loop.rootKey, (int)loop.scaleType);
+      lastPatchSaveMs = nowMs;
+      g_patchDirty = false;
+    }
+  }
 
   clampCameraToWorld();
   render(resources.renderer, resources.layout, world, resources.worldGlyphs,
          resources.textGlyphs, loop.tick, loop.showMenu, loop.menuPage,
-         resources.params, loop.menuSel, resources.synth.enabled, sf2Path,
-         uiLang);
-  SDL_Delay(6);
+         resources.params, loop.menuSel, resources.synth.enabled,
+         options.sf2Path, uiLang);
+  // ~60fps cap. The sim ticks at most 30/s; rendering faster than 60fps just
+  // burns CPU on the per-cell glyph pass with no visible benefit.
+  SDL_Delay(16);
 }
 
 }  // namespace
@@ -466,9 +575,24 @@ int runTerrarium(int argc, char** argv) {
   Rng rng;
   World world;
   initializeSimulation(options, resources, seed, rng, world);
+
+  // Restore the saved patch (mod matrix, chaos, voices, mixer, key/scale)
+  // before the synth starts so applyVoiceMixer reflects it.
+  int patchRootKey = 0;
+  int patchScale = (int)SCALE_PENTATONIC;
+  const bool patchLoaded =
+      loadPatch(options.patchPath, patchRootKey, patchScale);
+  if (patchLoaded) {
+    std::cerr << "[patch] loaded " << options.patchPath << "\n";
+  }
+
   initializeSynth(options, resources);
 
   LoopState loop;
+  if (patchLoaded) {
+    loop.rootKey = patchRootKey;
+    loop.scaleType = (ScaleType)patchScale;
+  }
   loop.lastFrame = std::chrono::steady_clock::now();
 
   while (loop.running) {
@@ -476,9 +600,9 @@ int runTerrarium(int argc, char** argv) {
     while (SDL_PollEvent(&event)) {
       handleEvent(event, resources, loop, seed, rng, world, options.uiLang);
     }
-    updateAndRender(resources, loop, world, rng, options.sf2Path,
-                    options.uiLang);
+    updateAndRender(resources, loop, world, rng, options, options.uiLang);
   }
 
+  savePatch(options.patchPath, loop.rootKey, (int)loop.scaleType);
   return 0;
 }
