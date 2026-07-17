@@ -1,0 +1,1914 @@
+// terrarium_0.32.cpp
+// SDL2 ASCII-glyph terrarium with: seasons, wind, water depth (DF-ish), vivid palette,
+// biome presets (meadow, wetland, alpine, alien, tropical), clouds + cloud shadows,
+// weather (clear/overcast/rain/storm), rain overlay, lightning, big rainbow,
+// lots of plant variance, more animals, and multi-tile "big" entities (2x2 deer, 3x3 ancient tree).
+//
+// Build (Linux):
+//   sudo apt install -y g++ libsdl2-dev
+//   g++ -O2 -std=c++17 terrarium_0.32.cpp -o terrarium_0.32 `sdl2-config --cflags --libs`
+//
+// Run examples:
+//   ./terrarium_0.32 --biome meadow
+//   ./terrarium_0.32 --biome tropical
+//   ./terrarium_0.32 --windowed --biome tropical
+//   ./terrarium_0.32 --fullscreen --biome meadow
+//
+// Controls:
+//   SPACE pause/unpause
+//   .     step (when paused)
+//   [ ]   slower/faster
+//   r     reseed
+//   F11   toggle fullscreen
+//   ESC   quit
+//
+// Notes:
+// - ASCII-only (no unicode) for portability and Termux-friendly compilation if needed.
+// - Clouds are a low-res field (CW x CH), scrolled by wind; shadows darken the world.
+// - Rain is overlay + modest water increase; storms add lightning and stronger wind.
+// - Big creatures are "stamped" at render time from anchor entities (simple, robust).
+
+#include <SDL.h>
+#include <algorithm>
+#include <array>
+#include <chrono>
+#include <cstdint>
+#include <cstring>
+#include <iostream>
+#include <random>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+static constexpr int W = 200;
+static constexpr int H = 112;
+
+static constexpr int CW = 50;
+static constexpr int CH = 28;
+
+static constexpr int DEFAULT_TPS = 6;
+
+static constexpr int SEASON_TICKS = 1800;
+static constexpr int DAY_TICKS    = 900;
+
+static constexpr int WIND_CHANGE_TICKS = 220;
+static constexpr int MAX_WIND = 5;
+
+enum WeatherState { CLEAR=0, OVERCAST=1, RAIN=2, STORM=3 };
+
+static constexpr float VIVID_SAT = 0.85f;  // <1 desaturates (pastel)
+static constexpr float VIVID_VAL = 1.22f;  // brighter
+
+static constexpr int BUG_CAP_BASE      = (W * H) / 75;
+static constexpr int BIRD_CAP_BASE     = (W * H) / 260;
+static constexpr int RABBIT_CAP_BASE   = (W * H) / 420;
+static constexpr int SNAKE_CAP_BASE    = (W * H) / 1200;
+static constexpr int FIREFLY_CAP_BASE  = (W * H) / 320;
+static constexpr int DEER_CAP_BASE     = (W * H) / 2400;
+static constexpr int OWL_CAP_BASE      = (W * H) / 2200;
+static constexpr int YETI_CAP_BASE     = (W * H) / 3200;
+
+using Grid = std::vector<std::string>;
+using Water = std::vector<std::vector<uint8_t>>;
+
+static inline bool inBounds(int x, int y) { return x >= 0 && x < W && y >= 0 && y < H; }
+
+struct Rng {
+  std::mt19937 rng;
+  explicit Rng(uint32_t seed) : rng(seed) {}
+  int i(int a, int b) { std::uniform_int_distribution<int> d(a, b); return d(rng); }
+  bool oneIn(int n) { return n > 0 && i(1, n) == 1; }
+  float u01() { std::uniform_real_distribution<float> d(0.f, 1.f); return d(rng); }
+};
+
+static inline uint32_t hash3(uint32_t x, uint32_t y, uint32_t salt) {
+  uint32_t h = x * 0x9E3779B1u ^ y * 0x85EBCA6Bu ^ salt * 0xC2B2AE35u;
+  h ^= (h >> 16); h *= 0x7FEB352Du; h ^= (h >> 15); h *= 0x846CA68Bu; h ^= (h >> 16);
+  return h;
+}
+
+static inline uint8_t clampU8(int v){ return (uint8_t)std::clamp(v, 0, 255); }
+
+static int countNeighborsChar(const Grid& g, int x, int y, char c) {
+  int n = 0;
+  for (int dy=-1; dy<=1; ++dy) for (int dx=-1; dx<=1; ++dx) {
+    if (dx==0 && dy==0) continue;
+    int nx=x+dx, ny=y+dy;
+    if (inBounds(nx,ny) && g[ny][nx]==c) n++;
+  }
+  return n;
+}
+
+static int countNeighborsWater(const Water& w, int x, int y) {
+  int n = 0;
+  for (int dy=-1; dy<=1; ++dy) for (int dx=-1; dx<=1; ++dx) {
+    if (dx==0 && dy==0) continue;
+    int nx=x+dx, ny=y+dy;
+    if (inBounds(nx,ny) && w[ny][nx]>0) n++;
+  }
+  return n;
+}
+
+enum Season { SPRING=0, SUMMER=1, AUTUMN=2, WINTER=3 };
+static inline Season seasonAt(int tick) { return (Season)((tick / SEASON_TICKS) % 4); }
+static inline float seasonLerp(int tick) { return float(tick % SEASON_TICKS) / float(SEASON_TICKS); }
+static inline bool nightish(int tick) { return ((tick / (DAY_TICKS/2)) % 2) == 1; }
+
+// ---------------- Biomes ----------------
+enum Biome { MEADOW=0, WETLAND=1, ALPINE=2, ALIEN=3, TROPICAL=4 };
+
+static const char* biomeName(Biome b) {
+  switch (b) {
+    case MEADOW: return "meadow";
+    case WETLAND:return "wetland";
+    case ALPINE: return "alpine";
+    case ALIEN:  return "alien";
+    case TROPICAL:return "tropical";
+  }
+  return "meadow";
+}
+
+struct BiomeWeights {
+  float pondDensity;
+  float stoneChance;
+  float reedChance;
+  float fernChance;
+  float flowerChance;
+  float bigFlowerChance;
+  float treeChance;
+  float mushChance;
+
+  float growRate;
+  float bloomRate;
+  float fireRate;
+  float alienRate;
+};
+
+static BiomeWeights weightsFor(Biome b) {
+  switch (b) {
+    case MEADOW: return {1.0f, 1.0f, 0.7f, 0.9f, 1.2f, 1.0f, 1.0f, 1.0f, 1.0f, 1.2f, 0.9f, 0.7f};
+    case WETLAND:return {1.35f,0.7f, 1.4f, 1.0f, 1.15f,1.0f, 0.9f, 1.2f, 1.0f, 1.3f, 0.8f, 0.7f};
+    case ALPINE: return {0.75f,1.6f, 0.5f, 0.6f, 0.7f, 0.6f, 0.7f, 0.7f, 0.75f,0.6f, 1.05f,0.8f};
+    case ALIEN:  return {1.05f,1.0f, 0.9f, 0.9f, 1.5f, 1.6f, 1.1f, 1.3f, 1.1f, 1.6f, 0.85f,1.6f};
+    case TROPICAL:return {1.25f,0.6f, 1.3f, 1.2f, 1.6f, 1.4f, 1.25f,1.15f,1.2f, 1.65f,0.75f,1.0f};
+  }
+  return weightsFor(MEADOW);
+}
+
+// ---------------- Wind / Weather / Clouds ----------------
+struct Wind { int dx=0, dy=0; int strength=0; };
+struct Weather {
+  WeatherState state = CLEAR;
+  float rainStrength = 0.f;
+  int timer = 0;
+  bool lastTickWasRaining = false;
+};
+struct Clouds {
+  std::vector<uint8_t> field;
+  float offX=0.f, offY=0.f;
+  Clouds() : field(CW*CH, 0) {}
+};
+
+struct World {
+  Grid terrain;
+  Grid entities;
+  Water water;
+  std::vector<std::vector<uint8_t>> height;
+  Grid overlay;
+  Wind wind;
+  Weather weather;
+  Clouds clouds;
+  Biome biome;
+  BiomeWeights bw;
+};
+
+// ---------------- Helpers ----------------
+static char waterGlyph(uint8_t d) {
+  switch (d) {
+    case 1: return ',';
+    case 2: return '-';
+    case 3: return '~';
+    case 4: return '=';
+    case 5: return '#';
+    case 6: return '%';
+    default: return '@';
+  }
+}
+
+static inline bool isTree(char c) { return c=='T' || c=='Y' || c=='P'; }
+static inline bool isVeg(char c) {
+  return (c==','||c=='"'||c=='#'||c=='m'||c=='f'||c=='+'||c=='&'||c==';'||c==':'||c=='$'||c=='!'||isTree(c));
+}
+static inline bool blocksEntity(char terrain, uint8_t waterDepth) {
+  if (waterDepth > 0) return true;
+  if (terrain == '*' || terrain == 'B' || terrain == 'M' || terrain == '^') return true;
+  return false;
+}
+
+static void initClouds(Clouds& c, Rng& r, Biome b) {
+  float base = (b==WETLAND) ? 110.f : (b==ALPINE ? 80.f : 95.f);
+  if (b==ALIEN) base = 105.f;
+  if (b==TROPICAL) base = 125.f;
+  for (int y=0; y<CH; ++y) for (int x=0; x<CW; ++x) {
+    float n = r.u01();
+    int v = int(base + (n-0.5f)*120.f);
+    c.field[y*CW + x] = clampU8(v);
+  }
+  c.offX = r.u01() * CW;
+  c.offY = r.u01() * CH;
+}
+
+static void blurClouds(Clouds& c) {
+  std::vector<uint8_t> tmp = c.field;
+  for (int y=0; y<CH; ++y) for (int x=0; x<CW; ++x) {
+    int acc=0, cnt=0;
+    for (int dy=-1; dy<=1; ++dy) for (int dx=-1; dx<=1; ++dx) {
+      int nx = (x+dx+CW)%CW, ny=(y+dy+CH)%CH;
+      acc += tmp[ny*CW+nx];
+      cnt++;
+    }
+    c.field[y*CW+x] = (uint8_t)(acc/cnt);
+  }
+}
+
+static void evolveClouds(Clouds& c, Rng& r, const Wind& w, const Weather& we, int tick) {
+  float speed = 0.010f + 0.008f * (float)w.strength;
+  if (we.state == STORM) speed *= 1.6f;
+  c.offX += speed * (float)w.dx;
+  c.offY += speed * (float)w.dy;
+  if (c.offX < 0) c.offX += CW; if (c.offX >= CW) c.offX -= CW;
+  if (c.offY < 0) c.offY += CH; if (c.offY >= CH) c.offY -= CH;
+
+  if (tick % 9 == 0) {
+    for (int i=0; i< (CW*CH)/18; ++i) {
+      int x = r.i(0, CW-1), y = r.i(0, CH-1);
+      int idx = y*CW+x;
+      int v = (int)c.field[idx] + r.i(-6, 6);
+      if (we.state == OVERCAST) v += 3;
+      if (we.state == CLEAR) v -= 2;
+      if (we.state == RAIN) v += 4;
+      if (we.state == STORM) v += 6;
+      c.field[idx] = clampU8(v);
+    }
+  }
+  if (tick % 23 == 0) blurClouds(c);
+}
+
+static uint8_t sampleCloud(const Clouds& c, int x, int y) {
+  float fx = (float)x / (float)W * (float)CW;
+  float fy = (float)y / (float)H * (float)CH;
+  int cx = (int)fx;
+  int cy = (int)fy;
+  cx = (cx + (int)c.offX) % CW;
+  cy = (cy + (int)c.offY) % CH;
+  if (cx < 0) cx += CW;
+  if (cy < 0) cy += CH;
+  return c.field[cy*CW + cx];
+}
+
+static float avgCloud(const Clouds& c) {
+  long acc=0;
+  for (auto v: c.field) acc += v;
+  return (float)acc / (float)(CW*CH);
+}
+
+// overlays
+static void clearOverlay(World& w) {
+  for (int y=0; y<H; ++y) std::fill(w.overlay[y].begin(), w.overlay[y].end(), ' ');
+}
+
+static void spawnRainbow(World& w, Rng& r) {
+  int cx = W/2 + r.i(-W/10, W/10);
+  int cy = H + r.i(H/6, H/3);
+  int R  = std::min(W, H) + r.i(10, 60);
+  int thick = 3 + r.i(0, 3);
+  const char bands[] = {'=', '-', '~', '+', '!'};
+  int nb = (int)(sizeof(bands)/sizeof(bands[0]));
+  for (int y=0; y<H; ++y) for (int x=0; x<W; ++x) {
+    int dx=x-cx, dy=y-cy;
+    int d2=dx*dx + dy*dy;
+    int r0=R, r1=R-thick;
+    if (d2 <= r0*r0 && d2 >= r1*r1) {
+      int band = (x + 2*y) % nb;
+      w.overlay[y][x] = bands[band];
+    }
+  }
+}
+
+static void applyRainOverlay(World& w, int tick) {
+  if (w.weather.rainStrength <= 0.01f) return;
+  int strength = (int)(w.weather.rainStrength * 10.f);
+  int drops = (W * H) / std::max(8, 30 - strength*2);
+
+  char streak = '|';
+  if (w.wind.strength > 0) {
+    if (w.wind.dx > 0) streak = '/';
+    else if (w.wind.dx < 0) streak = '\\';
+    else streak = '|';
+  }
+
+  for (int i=0; i<drops; ++i) {
+    int x = (int)(hash3(i, tick, 1337) % W);
+    int y = (int)(hash3(i, tick, 7331) % H);
+    if (w.overlay[y][x] == ' ') w.overlay[y][x] = streak;
+  }
+}
+
+static void updateWind(World& w, Rng& r, int tick) {
+  if (tick % WIND_CHANGE_TICKS != 0) return;
+
+  int target = 0;
+  if (w.weather.state == CLEAR) target = r.i(0, 2);
+  if (w.weather.state == OVERCAST) target = r.i(1, 3);
+  if (w.weather.state == RAIN) target = r.i(2, 4);
+  if (w.weather.state == STORM) target = r.i(3, MAX_WIND);
+
+  if (r.oneIn(8)) { w.wind.strength = 0; w.wind.dx=0; w.wind.dy=0; return; }
+  w.wind.strength = std::clamp(w.wind.strength + r.i(-1, 2), 0, MAX_WIND);
+  if (w.wind.strength < target && r.oneIn(2)) w.wind.strength++;
+  if (w.wind.strength > target && r.oneIn(3)) w.wind.strength--;
+
+  if (w.wind.strength == 0) { w.wind.dx=0; w.wind.dy=0; return; }
+
+  if (r.oneIn(2) || (w.wind.dx==0 && w.wind.dy==0)) {
+    int dirs[8][2] = { {1,0},{-1,0},{0,1},{0,-1},{1,1},{1,-1},{-1,1},{-1,-1} };
+    int k = r.i(0,7);
+    w.wind.dx = dirs[k][0];
+    w.wind.dy = dirs[k][1];
+  }
+}
+
+static void updateWeather(World& w, Rng& r, int tick) {
+  w.weather.timer++;
+  Season s = seasonAt(tick);
+
+  float cloudAvg = avgCloud(w.clouds);
+  bool cloudy = cloudAvg > 120.f;
+  bool veryCloudy = cloudAvg > 150.f;
+
+  auto toState = [&](WeatherState ns){
+    w.weather.state = ns;
+    w.weather.timer = 0;
+  };
+
+  switch (w.weather.state) {
+    case CLEAR: {
+      w.weather.rainStrength = std::max(0.f, w.weather.rainStrength - 0.02f);
+      if (cloudy && r.oneIn(6)) toState(OVERCAST);
+      int chance = (s==SUMMER? 220 : s==SPRING? 170 : s==AUTUMN? 190 : 260);
+      if (w.biome==TROPICAL) chance = std::max(120, chance-60);
+      if (r.oneIn(chance)) toState(OVERCAST);
+    } break;
+
+    case OVERCAST: {
+      w.weather.rainStrength = std::min(0.35f, w.weather.rainStrength + 0.01f);
+      if (veryCloudy && w.weather.timer > 80 && r.oneIn(3)) toState(RAIN);
+      if (!cloudy && w.weather.timer > 120 && r.oneIn(4)) toState(CLEAR);
+      if (w.weather.timer > 600 && r.oneIn(3)) toState(CLEAR);
+    } break;
+
+    case RAIN: {
+      w.weather.rainStrength = std::min(1.f, w.weather.rainStrength + 0.02f);
+      int stormChance = (s==SUMMER ? 180 : 420);
+      if (w.biome==TROPICAL) stormChance = std::max(120, stormChance-80);
+      if (w.weather.timer > 120 && r.oneIn(stormChance)) toState(STORM);
+      if (w.weather.timer > 350 && r.oneIn(6)) toState(OVERCAST);
+      if (w.weather.timer > 900) toState(OVERCAST);
+    } break;
+
+    case STORM: {
+      w.weather.rainStrength = std::min(1.f, w.weather.rainStrength + 0.03f);
+      if (w.weather.timer > 160 && r.oneIn(4)) toState(RAIN);
+      if (w.weather.timer > 420) toState(RAIN);
+    } break;
+  }
+
+  bool isRainingNow = (w.weather.state == RAIN || w.weather.state == STORM);
+  if (w.weather.lastTickWasRaining && !isRainingNow) {
+    float cavg = cloudAvg;
+    int chance = (cavg < 120.f) ? 2 : (cavg < 140.f ? 3 : 5);
+    if (w.biome==TROPICAL) chance = std::max(1, chance-1);
+    if (r.oneIn(chance)) spawnRainbow(w, r);
+  }
+  w.weather.lastTickWasRaining = isRainingNow;
+}
+
+// ---------------- Seeding world ----------------
+
+static void genHeight(World& w, uint32_t seed) {
+  auto noise = [&](int x,int y,int s)->uint8_t{
+    uint32_t h = hash3((uint32_t)x, (uint32_t)y, (uint32_t)(seed + (uint32_t)s*1013u));
+    return (uint8_t)(h & 255u);
+  };
+
+  for (int y=0;y<H;++y) for (int x=0;x<W;++x) {
+    int n1 = noise(x/6,  y/6,  1);
+    int n2 = noise(x/18, y/18, 2);
+    int n3 = noise(x/44, y/44, 3);
+    int v  = (n1*6 + n2*3 + n3*2) / 11;
+
+    int ridge = (int)(120 - std::abs(y - H/2)) / 2;
+    v = std::clamp(v + ridge, 0, 255);
+
+    w.height[y][x] = (uint8_t)v;
+  }
+
+  for (int pass=0; pass<2; ++pass) {
+    auto tmp = w.height;
+    for (int y=0;y<H;++y) for (int x=0;x<W;++x) {
+      int acc=0,cnt=0;
+      for (int dy=-1;dy<=1;++dy) for (int dx=-1;dx<=1;++dx) {
+        int nx=x+dx, ny=y+dy;
+        if (!inBounds(nx,ny)) continue;
+        acc += tmp[ny][nx];
+        cnt++;
+      }
+      w.height[y][x] = (uint8_t)(acc/cnt);
+    }
+  }
+}
+
+static void seedWorld(World& w, Rng& r, Biome biome) {
+  w.biome = biome;
+  w.bw = weightsFor(biome);
+
+  w.terrain.assign(H, std::string(W, '.'));
+  w.entities.assign(H, std::string(W, ' '));
+  w.overlay.assign(H, std::string(W, ' '));
+  w.water.assign(H, std::vector<uint8_t>(W, 0));
+  w.height.assign(H, std::vector<uint8_t>(W, 0));
+
+  w.wind = Wind{0,0,0};
+  w.weather = Weather{};
+  w.clouds = Clouds{};
+  initClouds(w.clouds, r, biome);
+  genHeight(w, (uint32_t)r.i(0, 0x7fffffff));
+
+  int basePonds = std::max(4, (W * H) / 9000);
+  int ponds = std::max(2, (int)(basePonds * w.bw.pondDensity));
+  for (int p=0; p<ponds; ++p) {
+    int marginX = std::max(12, W/18);
+    int marginY = std::max(8,  H/18);
+    int cx = r.i(marginX, W-1-marginX);
+    int cy = r.i(marginY, H-1-marginY);
+    int rad = r.i(5, 14);
+
+    for (int y=cy-rad; y<=cy+rad; ++y) for (int x=cx-rad; x<=cx+rad; ++x) {
+      if (!inBounds(x,y)) continue;
+      int dx=x-cx, dy=y-cy;
+      int d2 = dx*dx + dy*dy;
+      if (d2 <= rad*rad + r.i(-5,5)) {
+        uint8_t depth = (uint8_t)std::clamp(7 - (d2 / std::max(1,rad)), 2, 7);
+        w.water[y][x] = std::max<uint8_t>(w.water[y][x], depth);
+      }
+    }
+  }
+
+  // height-driven cliffs / boulders / mountain ridges
+  for (int y=0;y<H;++y) for (int x=0;x<W;++x) {
+    if (w.water[y][x] > 0) continue;
+    uint8_t alt = w.height[y][x];
+    if (alt > 245) { w.terrain[y][x] = 'M'; continue; }
+    if (alt > 232 && r.oneIn(2)) w.terrain[y][x] = '^';
+    if (alt > 238 && r.oneIn(3)) w.terrain[y][x] = 'B';
+  }
+
+  for (int y=0; y<H; ++y) for (int x=0; x<W; ++x) {
+    if (w.water[y][x] > 0) continue;
+    uint8_t alt = w.height[y][x];
+    float altGrow = 1.0f;
+    if (alt > 220) altGrow *= 0.45f;
+    else if (alt > 200) altGrow *= 0.65f;
+    else if (alt < 80) altGrow *= 1.25f;
+
+    uint8_t alt = w.height[y][x];
+    float altGrow = 1.0f;
+    if (alt > 220) altGrow *= 0.45f;
+    else if (alt > 200) altGrow *= 0.65f;
+    else if (alt < 80) altGrow *= 1.25f;
+
+    int wet = countNeighborsWater(w.water, x, y);
+    if (wet > 0 && r.oneIn(2)) w.terrain[y][x] = ',';
+    if (wet > 0 && r.u01() < 0.08f * w.bw.reedChance) w.terrain[y][x] = ':';
+  }
+
+  for (int y=0; y<H; ++y) for (int x=0; x<W; ++x) {
+    if (w.water[y][x] > 0) continue;
+    if (r.u01() < 0.0016f * w.bw.stoneChance) w.terrain[y][x] = '^';
+  }
+
+  // Mud tends to form near water edges (adds earth tones)
+  for (int k=0; k< (W*H)/420; ++k) {
+    int x=r.i(0,W-1), y=r.i(0,H-1);
+    if (w.water[y][x]>0) continue;
+    int wet = countNeighborsWater(w.water, x, y);
+    if (wet>0 && r.oneIn(2) && w.terrain[y][x]=='.') w.terrain[y][x]='d';
+    if (wet>1 && r.oneIn(3) && (w.terrain[y][x]==','||w.terrain[y][x]=='"')) w.terrain[y][x]='d';
+  }
+
+  // Extra boulders (earthy accents)
+  for (int k=0; k< (W*H)/9000; ++k) {
+    int x=r.i(0,W-1), y=r.i(0,H-1);
+    if (w.water[y][x]>0) continue;
+    if (w.terrain[y][x]=='.' || w.terrain[y][x]=='^') w.terrain[y][x]='B';
+  }
+
+  int starters = (W * H) / 700;
+  for (int k=0; k<starters; ++k) {
+    int x=r.i(0,W-1), y=r.i(0,H-1);
+    if (w.water[y][x]==0 && w.terrain[y][x]==',' && r.oneIn(3)) w.terrain[y][x] = '#';
+  }
+  for (int k=0; k< (W*H)/900; ++k) {
+    int x=r.i(0,W-1), y=r.i(0,H-1);
+    if (w.water[y][x]==0 && (w.terrain[y][x]==','||w.terrain[y][x]=='#') && r.u01() < 0.20f*w.bw.fernChance) w.terrain[y][x] = ';';
+  }
+  for (int k=0; k< (W*H)/2200; ++k) {
+    int x=r.i(0,W-1), y=r.i(0,H-1);
+    if (w.water[y][x]==0 && (w.terrain[y][x]=='#' || w.terrain[y][x]==',') && r.u01() < 0.35f*w.bw.treeChance)
+      w.terrain[y][x] = (w.biome==TROPICAL ? (r.oneIn(2)?'P':(r.oneIn(2)?'T':'Y')) : (r.oneIn(2) ? 'T' : 'Y'));
+  }
+
+  for (int k=0; k< (W*H)/700; ++k) {
+    int x=r.i(0,W-1), y=r.i(0,H-1);
+    if (w.water[y][x]==0 && (w.terrain[y][x]=='.' || w.terrain[y][x]==',') && countNeighborsWater(w.water, x, y)>0 && r.u01() < 0.40f*w.bw.mushChance)
+      w.terrain[y][x] = 'm';
+  }
+  for (int k=0; k< (W*H)/900; ++k) {
+    int x=r.i(0,W-1), y=r.i(0,H-1);
+    if (w.water[y][x]==0 && (w.terrain[y][x]==',' || w.terrain[y][x]=='"' || w.terrain[y][x]==';') && r.u01() < 0.30f*w.bw.flowerChance) {
+      float t = r.u01();
+      if (t < 0.12f*w.bw.bigFlowerChance) w.terrain[y][x] = '&';
+      else w.terrain[y][x] = (r.oneIn(2) ? 'f' : '+');
+    }
+  }
+
+  if (biome != ALPINE) {
+    for (int k=0; k< (W*H)/2400; ++k) {
+      int x=r.i(0,W-1), y=r.i(0,H-1);
+      if (w.water[y][x]==0 && (w.terrain[y][x]=='#' || w.terrain[y][x]==';') && r.oneIn(2)) w.terrain[y][x] = '$';
+    }
+  }
+
+  for (int k=0; k< (W*H)/9000; ++k) {
+    int x=r.i(0,W-1), y=r.i(0,H-1);
+    if (w.water[y][x]==0 && (w.terrain[y][x]==',' || w.terrain[y][x]=='"') && r.oneIn(2)) w.terrain[y][x] = '!';
+  }
+}
+
+// ---------------- Water flow ----------------
+static void stepWater(World& w, Rng& r) {
+  Water next = w.water;
+
+  int baseMoves = (W*H)/2;
+  int windMoves = (W*H)/8 * w.wind.strength;
+  int rainMoves = (w.weather.state==RAIN||w.weather.state==STORM) ? (W*H)/10 : 0;
+  int moves = baseMoves + windMoves + rainMoves;
+
+  if (w.weather.rainStrength > 0.05f) {
+    int hits = (int)((W*H)/420 * w.weather.rainStrength); // less global flooding
+    for (int i=0; i<hits; ++i) {
+      int x=r.i(0,W-1), y=r.i(0,H-1);
+      int wetN = countNeighborsWater(next, x, y);
+      if (wetN == 0 && !r.oneIn(7)) continue;
+      if (next[y][x] < 7 && r.oneIn(2)) next[y][x]++;
+    }
+  }
+
+  for (int k=0; k<moves; ++k) {
+    int x=r.i(0,W-1), y=r.i(0,H-1);
+    uint8_t d = next[y][x];
+    if (d==0) continue;
+
+    int dirs[6][2] = {{0,1},{-1,1},{1,1},{-1,0},{1,0},{0,-1}};
+    int bestNx=x, bestNy=y, bestScore=999999;
+
+    for (int i=0; i<6; ++i) {
+      int nx=x+dirs[i][0], ny=y+dirs[i][1];
+      if (!inBounds(nx,ny)) continue;
+      int score = (int)next[ny][nx]*10 + i;
+
+      if (w.wind.strength>0) {
+        int dot = dirs[i][0]*w.wind.dx + dirs[i][1]*w.wind.dy;
+        score -= dot * (2 + w.wind.strength);
+      }
+      score += r.i(0,4);
+
+      if (score < bestScore) { bestScore=score; bestNx=nx; bestNy=ny; }
+    }
+
+    if (bestNx==x && bestNy==y) continue;
+    uint8_t nd = next[bestNy][bestNx];
+
+    if (nd + 1 < d) { next[y][x]--; next[bestNy][bestNx]++; }
+    else if (w.wind.strength>=3 && r.oneIn(7) && nd < d) { next[y][x]--; next[bestNy][bestNx]++; }
+    else if (r.oneIn(12) && nd < d) { next[y][x]--; next[bestNy][bestNx]++; }
+  }
+
+  for (int y=0;y<H;++y) for (int x=0;x<W;++x) next[y][x] = (uint8_t)std::min<int>(7, next[y][x]);
+  w.water.swap(next);
+}
+
+
+static void waterSinks(World& w, Rng& r, Season s) {
+  // Prevent long-term "oceanification" by adding sinks.
+  float evap = 0.00055f;
+  if (s == SUMMER) evap *= 1.6f;
+  if (s == WINTER) evap *= 0.55f;
+
+  if (w.weather.state == CLEAR)    evap *= 1.35f;
+  if (w.weather.state == OVERCAST) evap *= 0.95f;
+  if (w.weather.state == RAIN)     evap *= 0.45f;
+  if (w.weather.state == STORM)    evap *= 0.35f;
+
+  evap *= (1.0f + 0.10f * (float)w.wind.strength);
+
+  float infil = 0.0010f;
+  if (w.biome == TROPICAL) infil *= 0.85f;
+  if (s == SUMMER) infil *= 1.15f;
+  if (s == WINTER) infil *= 0.75f;
+
+  float edgeDrain = 0.0040f;
+  if (w.biome == WETLAND) edgeDrain *= 0.60f;
+  if (w.biome == TROPICAL) edgeDrain *= 0.70f;
+
+  for (int y=0; y<H; ++y) for (int x=0; x<W; ++x) {
+    uint8_t &d = w.water[y][x];
+    if (d == 0) continue;
+
+    // Infiltration for shallow puddles on porous ground/vegetation.
+    if (d <= 2) {
+      char t = w.terrain[y][x];
+      bool porous =
+        (t=='.' || t==',' || t=='"' || t==';' || t=='#' || t==':' || t=='d' ||
+         t=='m' || t=='f' || t=='+' || t=='&' || t=='!' || t=='$' || isTree(t));
+      if (porous && r.u01() < infil) { d--; continue; }
+    }
+
+    // Evaporation.
+    if (r.u01() < evap) { d--; continue; }
+
+    // Edge drainage.
+    bool nearEdge = (x < 2 || y < 2 || x > W-3 || y > H-3);
+    if (nearEdge && r.u01() < edgeDrain) { d--; continue; }
+  }
+}
+
+
+
+// ---------------- Terrain ecology ----------------
+static void stepTerrain(World& w, Rng& r, Season s, int tick) {
+  Grid next = w.terrain;
+
+  float springBoost = (s==SPRING) ? 1.35f : 1.0f;
+  float autumnMush  = (s==AUTUMN) ? 1.35f : 1.0f;
+  float winterSlow  = (s==WINTER) ? 1.55f : 1.0f;
+
+  float rainBoost = (w.weather.state==RAIN || w.weather.state==STORM) ? (1.0f + 0.7f*w.weather.rainStrength) : 1.0f;
+
+  for (int y=0; y<H; ++y) for (int x=0; x<W; ++x) {
+    if (w.water[y][x] > 0) {
+      if (w.terrain[y][x] == '*') next[y][x] = 'x';
+      continue;
+    }
+
+    char c = w.terrain[y][x];
+
+    if (c=='*') { next[y][x] = (r.oneIn(3) ? 'x' : '*'); continue; }
+    if (c=='x') {
+      int wet = countNeighborsWater(w.water, x, y);
+      if (wet>0 && r.oneIn(6)) next[y][x]=',';
+      else if (r.oneIn((int)(35*winterSlow))) next[y][x]='.';
+      continue;
+    }
+
+    if (isVeg(c)) {
+      bool ignite = false;
+      for (int dy=-1; dy<=1 && !ignite; ++dy) for (int dx=-1; dx<=1 && !ignite; ++dx) {
+        if (dx==0 && dy==0) continue;
+        int nx=x+dx, ny=y+dy;
+        if (!inBounds(nx,ny)) continue;
+        if (w.terrain[ny][nx]=='*') {
+          int dot = dx*w.wind.dx + dy*w.wind.dy;
+          int boost = 0;
+          if (w.wind.strength>0) boost += std::max(0, dot)*w.wind.strength;
+          if (w.weather.state==STORM) boost += 2;
+          int denom = std::max(2, (int)(10 - boost));
+          // tropical slightly more fire-prone during storms
+          if (w.biome==TROPICAL && w.weather.state==STORM) denom = std::max(2, denom-1);
+          if (r.oneIn(denom)) ignite = true;
+        }
+      }
+      if (ignite) { next[y][x]='*'; continue; }
+    }
+
+    int wet = countNeighborsWater(w.water, x, y);
+    int g   = countNeighborsChar(w.terrain, x, y, ',');
+    int tg  = countNeighborsChar(w.terrain, x, y, '"');
+    int sh  = countNeighborsChar(w.terrain, x, y, '#');
+    int tr  = countNeighborsChar(w.terrain, x, y, 'T') + countNeighborsChar(w.terrain, x, y, 'Y') + countNeighborsChar(w.terrain, x, y, 'P');
+    int flo = countNeighborsChar(w.terrain, x, y, 'f') + countNeighborsChar(w.terrain, x, y, '+') +
+              countNeighborsChar(w.terrain, x, y, '&') + countNeighborsChar(w.terrain, x, y, '!') +
+              countNeighborsChar(w.terrain, x, y, '$');
+    int fern= countNeighborsChar(w.terrain, x, y, ';');
+    int reeds=countNeighborsChar(w.terrain, x, y, ':');
+
+    if (c=='.') {
+      int fert = wet*3 + g + tg + flo + fern;
+      float p = 0.0032f * fert * w.bw.growRate * springBoost * rainBoost * altGrow / winterSlow;
+      if (w.biome==TROPICAL) p *= 1.25f;
+      if (fert>0 && r.u01() < p) next[y][x] = ',';
+      if (wet>0 && r.u01() < 0.05f * w.bw.reedChance * rainBoost / winterSlow) next[y][x] = ':';
+      if (r.oneIn((int)(6000 / w.bw.stoneChance))) next[y][x] = '^';
+      continue;
+    }
+
+    if (c=='^') {
+      if (wet>0 && r.oneIn((int)(220 / (w.bw.growRate*rainBoost)))) next[y][x] = ',';
+      continue;
+    }
+
+    if (c==':') {
+      if (wet==0 && r.oneIn((int)(18*winterSlow))) next[y][x]='.';
+      if (wet>0 && r.oneIn(40)) {
+        int nx=x+r.i(-1,1), ny=y+r.i(-1,1);
+        if (inBounds(nx,ny) && w.water[ny][nx]==0 && w.terrain[ny][nx]=='.') next[ny][nx]=':';
+      }
+      continue;
+    }
+
+    if (c==';') {
+      if (wet==0 && r.oneIn((int)(30*winterSlow))) next[y][x]=',';
+      if (wet>0 && r.oneIn((int)(55 / (springBoost*rainBoost)))) {
+        int nx=x+r.i(-1,1), ny=y+r.i(-1,1);
+        if (inBounds(nx,ny) && w.water[ny][nx]==0 && (w.terrain[ny][nx]==',' || w.terrain[ny][nx]=='.')) next[ny][nx]=';';
+      }
+      continue;
+    }
+
+    if (c=='$') {
+      if (s==SUMMER && wet>0 && r.oneIn(180)) {
+        int nx=x+r.i(-1,1), ny=y+r.i(-1,1);
+        if (inBounds(nx,ny) && w.water[ny][nx]==0 && (w.terrain[ny][nx]==',' || w.terrain[ny][nx]==';')) next[ny][nx]='$';
+      }
+      if (s==WINTER && r.oneIn(80)) next[y][x]='#';
+      continue;
+    }
+
+    if (c==',') {
+      if ((g+tg)>=4 && r.oneIn((int)(90*winterSlow))) next[y][x]='"';
+      float flowerScale = (alt > 200) ? 0.35f : 1.0f;
+      if (wet>0 && r.u01() < (0.005f * springBoost * rainBoost * w.bw.bloomRate * flowerScale)) {
+        float t = r.u01();
+        if (t < 0.05f * w.bw.bigFlowerChance) next[y][x] = '!';
+        else if (t < 0.16f * w.bw.bigFlowerChance) next[y][x] = '&';
+        else next[y][x] = (r.oneIn(2) ? 'f' : '+');
+      }
+      if (wet>0 && r.oneIn((int)(260 / (springBoost*rainBoost)))) next[y][x]=';';
+      if ((wet+g+tg+reeds)==0 && r.oneIn((int)(75*winterSlow))) next[y][x]='.';
+      continue;
+    }
+
+    if (c=='"') {
+      if ((g+tg)>=5 && r.oneIn((int)(140*winterSlow))) next[y][x]='#';
+      if (wet>0 && r.u01() < (0.004f * springBoost * rainBoost * w.bw.bloomRate)) {
+        float t=r.u01();
+        if (t < 0.10f*w.bw.bigFlowerChance) next[y][x]='&';
+        else next[y][x] = (r.oneIn(2)?'f':'+');
+      }
+      if (wet==0 && r.oneIn((int)(120*winterSlow))) next[y][x]=',';
+      continue;
+    }
+
+    if (c=='#') {
+      if ((sh+tr)>=3 && wet>0 && r.oneIn((int)(280*winterSlow)))
+        next[y][x]=(w.biome==TROPICAL ? (r.oneIn(2)?'P':(r.oneIn(2)?'T':'Y')) : (r.oneIn(2)?'T':'Y'));
+      if (wet==0 && r.oneIn((int)(170*winterSlow))) next[y][x]='"';
+      if (wet>0 && r.u01() < 0.006f * autumnMush * rainBoost * w.bw.mushChance) next[y][x]='m';
+      if (s==SUMMER && r.oneIn(220) && w.biome!=ALPINE) next[y][x]='$';
+      continue;
+    }
+
+    if (isTree(c)) {
+      if (wet>0 && r.oneIn((int)(230 / (rainBoost)))) {
+        int nx=x+r.i(-1,1), ny=y+r.i(-1,1);
+        if (inBounds(nx,ny) && w.water[ny][nx]==0 && (w.terrain[ny][nx]=='.'||w.terrain[ny][nx]==',')) {
+          int pick = r.i(1, 10);
+          if (pick <= 3) next[ny][nx]='m';
+          else if (pick <= 5) next[ny][nx]=';';
+          else if (pick <= 7) next[ny][nx]='$';
+          else if (pick == 8) next[ny][nx]='!';
+          else next[ny][nx]=(r.oneIn(2)?'f':'+');
+        }
+      }
+      if (wet==0 && r.oneIn((int)(1400*winterSlow))) next[y][x]='#';
+      continue;
+    }
+
+    if (c=='m') {
+      if (wet==0 && tr==0 && r.oneIn((int)(28*winterSlow))) next[y][x]='.';
+      if ((wet+tr)>=2 && r.u01() < 0.02f * autumnMush * rainBoost * w.bw.mushChance) {
+        int nx=x+r.i(-1,1), ny=y+r.i(-1,1);
+        if (inBounds(nx,ny) && w.water[ny][nx]==0 && (w.terrain[ny][nx]=='.'||w.terrain[ny][nx]==',')) next[ny][nx]='m';
+      }
+      continue;
+    }
+
+    if (c=='f' || c=='+' || c=='&' || c=='!' ) {
+      int fade = 170;
+      if (s==WINTER) fade = 70;
+      if (s==SPRING) fade = 230;
+      if (w.weather.state==STORM) fade = std::max(40, fade-30);
+      if (w.biome==TROPICAL) fade = (int)(fade * 1.25f);
+      if (r.oneIn((int)(fade*winterSlow))) next[y][x] = (r.oneIn(2)?',':'.');
+
+      if (wet>0 && (g+tg+fern)>=3 && r.u01() < 0.0045f * springBoost * rainBoost * w.bw.bloomRate) {
+        int nx=x+r.i(-1,1), ny=y+r.i(-1,1);
+        if (inBounds(nx,ny) && w.water[ny][nx]==0 && (w.terrain[ny][nx]==','||w.terrain[ny][nx]=='"'||w.terrain[ny][nx]==';')) {
+          float t=r.u01();
+          if (t < 0.06f*w.bw.bigFlowerChance) next[ny][nx]='!';
+          else if (t < 0.18f*w.bw.bigFlowerChance) next[ny][nx]='&';
+          else next[ny][nx]=(r.oneIn(2)?'f':'+');
+        }
+      }
+      continue;
+    }
+  }
+
+  w.terrain.swap(next);
+}
+
+// ---------------- Lightning ----------------
+static void lightning(World& w, Rng& r, std::string& banner) {
+  banner = "STORM: lightning!";
+  int strikes = 2 + r.i(0, 4);
+  for (int s=0; s<strikes; ++s) {
+    int cx=r.i(0,W-1), cy=r.i(0,H-1);
+    for (int k=0; k<260; ++k) {
+      int x=cx+r.i(-20,20), y=cy+r.i(-12,12);
+      if (!inBounds(x,y)) continue;
+      if (w.water[y][x] > 0) continue;
+      if (isVeg(w.terrain[y][x]) && r.oneIn(2)) w.terrain[y][x]='*';
+    }
+  }
+}
+
+// ---------------- Chaos ----------------
+static void chaosAlien(World& w, Rng& r, std::string& banner) {
+  banner = "Alien: reality flexes";
+  for (int tries=0; tries<800; ++tries) {
+    int x=r.i(0,W-1), y=r.i(0,H-1);
+    if (w.water[y][x]>0) continue;
+    if (w.entities[y][x]==' ') { w.entities[y][x]='A'; break; }
+  }
+  for (int k=0; k<340; ++k) {
+    int x=r.i(0,W-1), y=r.i(0,H-1);
+    if (r.oneIn(9)) w.water[y][x] = (uint8_t)r.i(0,7);
+    if (w.water[y][x]==0) {
+      char &t = w.terrain[y][x];
+      if (t=='.' && r.oneIn(3)) t=',';
+      else if (t==',' && r.oneIn(3)) t=(r.oneIn(2)?'"':(r.oneIn(2)?';':':'));
+      else if (t=='"' && r.oneIn(5)) t='#';
+      else if (t=='#' && r.oneIn(6)) t=(r.oneIn(2)?'T':'Y');
+      else if (isTree(t) && r.oneIn(18)) t='*';
+      else if (t==',' && r.oneIn(20)) t='!';
+    }
+  }
+}
+
+static void maybeChaos(World& w, Rng& r, std::string& banner, Season s) {
+  int base = (w.biome==ALIEN) ? 900 : (w.biome==TROPICAL ? 1100 : 1400);
+  if (!r.oneIn(base)) { banner = "calm"; return; }
+
+  int roll = r.i(1, 100);
+  if (s==SPRING) {
+    if (roll <= 55) banner = "spring bloom";
+    else if (roll <= 65) chaosAlien(w,r,banner);
+    else banner = "fresh wind";
+  } else if (s==SUMMER) {
+    if (roll <= 45) banner = "summer heat";
+    else if (roll <= 70) chaosAlien(w,r,banner);
+    else banner = "wild gusts";
+  } else if (s==AUTUMN) {
+    if (roll <= 35) banner = "spore drift";
+    else if (roll <= 55) chaosAlien(w,r,banner);
+    else banner = "autumn hush";
+  } else {
+    if (roll <= 20) chaosAlien(w,r,banner);
+    else banner = "winter hush";
+  }
+}
+
+// ---------------- Entities ----------------
+static void stepEntities(World& w, Rng& r, Season s, int tick) {
+  Grid cur = w.entities;
+  Grid out = cur;
+
+  auto countEnt = [&](char c){
+    int total=0;
+    for (int y=0;y<H;++y) for (int x=0;x<W;++x) if (cur[y][x]==c) total++;
+    return total;
+  };
+
+  int bugs = countEnt('b');
+  int birds = countEnt('v');
+  int rabbits = countEnt('r');
+  int snakes = countEnt('s');
+  int fireflies = countEnt('F');
+  int owls = countEnt('O');
+  int deer = countEnt('D');
+  int yetis = countEnt('H');
+
+  auto canSpawnAt = [&](int x,int y){
+    if (!inBounds(x,y)) return false;
+    if (cur[y][x] != ' ') return false;
+    if (blocksEntity(w.terrain[y][x], w.water[y][x])) return false;
+    return true;
+  };
+
+  if (bugs < BUG_CAP_BASE && r.oneIn(2)) {
+    for (int tries=0; tries<180; ++tries) {
+      int x=r.i(0,W-1), y=r.i(0,H-1);
+      if (!canSpawnAt(x,y)) continue;
+      char t = w.terrain[y][x];
+      if (t=='f'||t=='+'||t=='&'||t=='!'||t=='$') { out[y][x]='b'; break; }
+      if ((t==','||t=='"'||t==';') &&
+          (countNeighborsChar(w.terrain,x,y,'f')+countNeighborsChar(w.terrain,x,y,'+')+
+           countNeighborsChar(w.terrain,x,y,'&')+countNeighborsChar(w.terrain,x,y,'!') > 0) && r.oneIn(7)) {
+        out[y][x]='b'; break;
+      }
+    }
+  }
+
+  if (w.biome != ALPINE && rabbits < RABBIT_CAP_BASE && r.oneIn(10)) {
+    for (int tries=0; tries<220; ++tries) {
+      int x=r.i(0,W-1), y=r.i(0,H-1);
+      if (!canSpawnAt(x,y)) continue;
+      char t=w.terrain[y][x];
+      if (t==','||t=='"'||t==';') { out[y][x]='r'; break; }
+    }
+  }
+
+  if (birds < BIRD_CAP_BASE && bugs > BUG_CAP_BASE/6 && r.oneIn(12)) {
+    for (int tries=0; tries<200; ++tries) {
+      int x=r.i(0,W-1), y=r.i(0,H-1);
+      if (canSpawnAt(x,y)) { out[y][x]='v'; break; }
+    }
+  }
+
+  if (snakes < SNAKE_CAP_BASE && (rabbits > RABBIT_CAP_BASE/10 || bugs > BUG_CAP_BASE/5) && r.oneIn(60)) {
+    for (int tries=0; tries<260; ++tries) {
+      int x=r.i(0,W-1), y=r.i(0,H-1);
+      if (!canSpawnAt(x,y)) continue;
+      if (w.terrain[y][x]==','||w.terrain[y][x]=='"'||w.terrain[y][x]=='#') { out[y][x]='s'; break; }
+    }
+  }
+
+  if (s==SUMMER && nightish(tick) && fireflies < FIREFLY_CAP_BASE && r.oneIn(5)) {
+    for (int tries=0; tries<220; ++tries) {
+      int x=r.i(0,W-1), y=r.i(0,H-1);
+      if (!canSpawnAt(x,y)) continue;
+      char t=w.terrain[y][x];
+      if (t==','||t=='"'||t==';'||t=='f'||t=='+') { out[y][x]='F'; break; }
+    }
+  }
+
+  if (s==WINTER && nightish(tick) && owls < OWL_CAP_BASE && r.oneIn(120)) {
+    for (int tries=0; tries<260; ++tries) {
+      int x=r.i(0,W-1), y=r.i(0,H-1);
+      if (canSpawnAt(x,y)) { out[y][x]='O'; break; }
+    }
+  }
+
+  if (s==WINTER && yetis < YETI_CAP_BASE && r.oneIn(90)) {
+    for (int tries=0; tries<260; ++tries) {
+      int x=r.i(0,W-1), y=r.i(0,H-1);
+      if (!canSpawnAt(x,y)) continue;
+      if (w.height[y][x] < 210) continue;
+      char t=w.terrain[y][x];
+      if (t=='.'||t=='^' || t=='M') { out[y][x]='H'; break; }
+    }
+  }
+
+  if ((w.biome==MEADOW || w.biome==WETLAND || w.biome==TROPICAL) && deer < DEER_CAP_BASE && r.oneIn(140)) {
+    for (int tries=0; tries<420; ++tries) {
+      int x=r.i(0,W-2), y=r.i(0,H-2);
+      bool ok=true;
+      for (int dy=0; dy<2 && ok; ++dy) for (int dx=0; dx<2 && ok; ++dx) {
+        if (!canSpawnAt(x+dx,y+dy)) ok=false;
+      }
+      if (!ok) continue;
+      if (w.terrain[y][x]==',' || w.terrain[y][x]=='"' || w.terrain[y][x]==';') { out[y][x]='D'; break; }
+    }
+  }
+
+  auto canMoveTo = [&](int nx,int ny){
+    if (!inBounds(nx,ny)) return false;
+    if (cur[ny][nx] != ' ') return false;
+    if (blocksEntity(w.terrain[ny][nx], w.water[ny][nx])) return false;
+    return true;
+  };
+  auto moveTo = [&](int x,int y,int nx,int ny,char e){
+    out[ny][nx]=e; out[y][x]=' ';
+  };
+
+  for (int y=0; y<H; ++y) for (int x=0; x<W; ++x) {
+    char e = cur[y][x];
+    if (e==' ') continue;
+    if (out[y][x] != e) continue;
+
+    if (e=='b') {
+      if (r.oneIn(420)) { out[y][x]=' '; continue; }
+      int bestNx=x,bestNy=y,bestScore=999999;
+      for (int dy=-1; dy<=1; ++dy) for (int dx=-1; dx<=1; ++dx) {
+        if (dx==0 && dy==0) continue;
+        int nx=x+dx, ny=y+dy;
+        if (!canMoveTo(nx,ny)) continue;
+        int score=r.i(0,18);
+        char t=w.terrain[ny][nx];
+        if (t=='!') score-=120;
+        else if (t=='&') score-=90;
+        else if (t=='f'||t=='+') score-=70;
+        else if (t=='$') score-=55;
+        else if (t==';') score-=25;
+        else if (t=='"') score-=18;
+        else if (t==',') score-=10;
+        else if (t=='.') score+=10;
+        if (score<bestScore){bestScore=score;bestNx=nx;bestNy=ny;}
+      }
+      if (bestNx!=x||bestNy!=y) moveTo(x,y,bestNx,bestNy,'b');
+      continue;
+    }
+
+    if (e=='r') {
+      if (r.oneIn(900)) { out[y][x]=' '; continue; }
+      int bestNx=x,bestNy=y,bestScore=999999;
+      for (int dy=-1; dy<=1; ++dy) for (int dx=-1; dx<=1; ++dx) {
+        if (dx==0&&dy==0) continue;
+        int nx=x+dx, ny=y+dy;
+        if (!canMoveTo(nx,ny)) continue;
+        int score = r.i(0,25);
+        char t=w.terrain[ny][nx];
+        if (t=='"'||t==',') score-=18;
+        if (t=='f'||t=='+'||t=='&'||t=='!') score-=25;
+        int danger=0;
+        for (int oy=-2; oy<=2; ++oy) for (int ox=-2; ox<=2; ++ox) {
+          int ax=nx+ox, ay=ny+oy;
+          if (!inBounds(ax,ay)) continue;
+          if (cur[ay][ax]=='s' || cur[ay][ax]=='v' || cur[ay][ax]=='O') danger++;
+        }
+        score += danger*20;
+        if (score<bestScore){bestScore=score;bestNx=nx;bestNy=ny;}
+      }
+      if (bestNx!=x||bestNy!=y) {
+        moveTo(x,y,bestNx,bestNy,'r');
+        char &t = w.terrain[bestNy][bestNx];
+        if ((t=='"'||t==',') && r.oneIn(6)) t='.';
+        else if ((t=='f'||t=='+'||t=='&'||t=='!') && r.oneIn(2)) t=',';
+      }
+      continue;
+    }
+
+    if (e=='v') {
+      if (r.oneIn(700)) { out[y][x]=' '; continue; }
+      bool ate=false;
+      for (int dy=-1; dy<=1 && !ate; ++dy) for (int dx=-1; dx<=1 && !ate; ++dx) {
+        if (dx==0&&dy==0) continue;
+        int nx=x+dx, ny=y+dy;
+        if (!inBounds(nx,ny)) continue;
+        if (cur[ny][nx]=='b' && !blocksEntity(w.terrain[ny][nx], w.water[ny][nx])) {
+          out[ny][nx]='v'; out[y][x]=' '; ate=true;
+        }
+      }
+      if (ate) continue;
+
+      int bestNx=x,bestNy=y,bestScore=999999;
+      for (int dy=-1; dy<=1; ++dy) for (int dx=-1; dx<=1; ++dx) {
+        if (dx==0&&dy==0) continue;
+        int nx=x+dx, ny=y+dy;
+        if (!canMoveTo(nx,ny)) continue;
+        int bugLocal=0;
+        for (int oy=-2; oy<=2; ++oy) for (int ox=-2; ox<=2; ++ox) {
+          int ax=nx+ox, ay=ny+oy;
+          if (inBounds(ax,ay) && cur[ay][ax]=='b') bugLocal++;
+        }
+        int score = -bugLocal*22 + r.i(0,22);
+        if (score<bestScore){bestScore=score;bestNx=nx;bestNy=ny;}
+      }
+      if (bestNx!=x||bestNy!=y) moveTo(x,y,bestNx,bestNy,'v');
+      continue;
+    }
+
+    if (e=='s') {
+      if (r.oneIn(1800)) { out[y][x]=' '; continue; }
+      bool ate=false;
+      for (int dy=-1; dy<=1 && !ate; ++dy) for (int dx=-1; dx<=1 && !ate; ++dx) {
+        if (dx==0&&dy==0) continue;
+        int nx=x+dx, ny=y+dy;
+        if (!inBounds(nx,ny)) continue;
+        if ((cur[ny][nx]=='r' || cur[ny][nx]=='b') && !blocksEntity(w.terrain[ny][nx], w.water[ny][nx])) {
+          out[ny][nx]='s'; out[y][x]=' '; ate=true;
+        }
+      }
+      if (ate) continue;
+
+      int bestNx=x,bestNy=y,bestScore=999999;
+      for (int dy=-1; dy<=1; ++dy) for (int dx=-1; dx<=1; ++dx) {
+        if (dx==0&&dy==0) continue;
+        int nx=x+dx, ny=y+dy;
+        if (!canMoveTo(nx,ny)) continue;
+        int prey=0;
+        for (int oy=-3; oy<=3; ++oy) for (int ox=-3; ox<=3; ++ox) {
+          int ax=nx+ox, ay=ny+oy;
+          if (!inBounds(ax,ay)) continue;
+          if (cur[ay][ax]=='r') prey += 3;
+          else if (cur[ay][ax]=='b') prey += 1;
+        }
+        int score = -prey*10 + r.i(0,30);
+        char t=w.terrain[ny][nx];
+        if (t=='#') score-=8;
+        if (t==','||t=='"') score-=5;
+        if (t=='.') score+=8;
+        if (score<bestScore){bestScore=score;bestNx=nx;bestNy=ny;}
+      }
+      if (bestNx!=x||bestNy!=y) moveTo(x,y,bestNx,bestNy,'s');
+      continue;
+    }
+
+    if (e=='F') {
+      if (!nightish(tick) || r.oneIn(260)) { out[y][x]=' '; continue; }
+      int nx=x+r.i(-1,1), ny=y+r.i(-1,1);
+      if (canMoveTo(nx,ny)) moveTo(x,y,nx,ny,'F');
+      continue;
+    }
+
+    if (e=='O') {
+      if (!nightish(tick) || s!=WINTER || r.oneIn(1400)) { out[y][x]=' '; continue; }
+      bool ate=false;
+      for (int dy=-1; dy<=1 && !ate; ++dy) for (int dx=-1; dx<=1 && !ate; ++dx) {
+        if (dx==0&&dy==0) continue;
+        int nx=x+dx, ny=y+dy;
+        if (!inBounds(nx,ny)) continue;
+        if ((cur[ny][nx]=='v' || cur[ny][nx]=='b') && !blocksEntity(w.terrain[ny][nx], w.water[ny][nx])) {
+          out[ny][nx]='O'; out[y][x]=' '; ate=true;
+        }
+      }
+      if (ate) continue;
+      int nx=x+r.i(-1,1), ny=y+r.i(-1,1);
+      if (canMoveTo(nx,ny)) moveTo(x,y,nx,ny,'O');
+      continue;
+    }
+
+    if (e=='H') {
+      if (s!=WINTER || r.oneIn(900)) { out[y][x]=' '; continue; }
+      if (!r.oneIn(2)) continue;
+      int bestNx=x,bestNy=y,bestScore=999999;
+      for (int dy=-1; dy<=1; ++dy) for (int dx=-1; dx<=1; ++dx) {
+        if (dx==0&&dy==0) continue;
+        int nx=x+dx, ny=y+dy;
+        if (!canMoveTo(nx,ny)) continue;
+        int score=r.i(0,25);
+        char t=w.terrain[ny][nx];
+        if (t=='.') score-=10;
+        if (t=='^') score-=8;
+        if (isVeg(t)) score+=25;
+        if (score<bestScore){bestScore=score;bestNx=nx;bestNy=ny;}
+      }
+      if (bestNx!=x||bestNy!=y) moveTo(x,y,bestNx,bestNy,'H');
+      continue;
+    }
+
+    if (e=='D') {
+      if (r.oneIn(900)) { out[y][x]=' '; continue; }
+      if (!r.oneIn(6)) continue;
+      int dirx = r.i(-1,1), diry = r.i(-1,1);
+      int nx=x+dirx, ny=y+diry;
+      if (nx < 0 || ny < 0 || nx > W-2 || ny > H-2) continue;
+      bool ok=true;
+      for (int dy=0; dy<2 && ok; ++dy) for (int dx=0; dx<2 && ok; ++dx) {
+        if (blocksEntity(w.terrain[ny+dy][nx+dx], w.water[ny+dy][nx+dx])) ok=false;
+        if (cur[ny+dy][nx+dx] != ' ' && !(nx+dx==x && ny+dy==y)) ok=false;
+      }
+      if (!ok) continue;
+      out[ny][nx] = 'D';
+      out[y][x] = ' ';
+      if (w.terrain[y][x]==',' && r.oneIn(4)) w.terrain[y][x]='.';
+      continue;
+    }
+
+    if (e=='A') {
+      if (r.oneIn(1200)) { out[y][x]=' '; continue; }
+      int nx=x+r.i(-1,1), ny=y+r.i(-1,1);
+      if (canMoveTo(nx,ny)) {
+        if (w.water[y][x]==0 && r.oneIn(8)) w.terrain[y][x] = (r.oneIn(2)?'m':'!');
+        if (r.oneIn(24)) w.water[y][x] = (uint8_t)r.i(0,7);
+        moveTo(x,y,nx,ny,'A');
+      }
+      continue;
+    }
+  }
+
+  w.entities.swap(out);
+}
+
+// big ancient tree anchors 'Q'
+static void maybeSpawnAncientTree(World& w, Rng& r) {
+  if (!r.oneIn(2200)) return;
+  for (int tries=0; tries<500; ++tries) {
+    int x=r.i(1, W-2), y=r.i(1, H-2);
+    if (w.water[y][x] > 0) continue;
+    if (w.entities[y][x] != ' ') continue;
+    int trees = countNeighborsChar(w.terrain, x, y, 'T') + countNeighborsChar(w.terrain, x, y, 'Y') + countNeighborsChar(w.terrain, x, y, 'P');
+    if (trees < 2) continue;
+    w.entities[y][x] = 'Q';
+    break;
+  }
+}
+
+// ---------------- Step ----------------
+static void step(World& w, Rng& r, std::string& banner, int tick) {
+  clearOverlay(w);
+
+  Season s = seasonAt(tick);
+
+  evolveClouds(w.clouds, r, w.wind, w.weather, tick);
+  updateWeather(w, r, tick);
+  updateWind(w, r, tick);
+
+  if (w.weather.state == STORM && r.oneIn(35)) lightning(w, r, banner);
+  maybeChaos(w, r, banner, s);
+
+  stepWater(w, r);
+  waterSinks(w, r, s);
+  stepTerrain(w, r, s, tick);
+  stepEntities(w, r, s, tick);
+  maybeSpawnAncientTree(w, r);
+
+  applyRainOverlay(w, tick);
+}
+
+// ---------------- Rendering ----------------
+static inline void setColor(SDL_Renderer* rr, uint8_t R, uint8_t G, uint8_t B, uint8_t A=255) {
+  SDL_SetRenderDrawColor(rr, R, G, B, A);
+}
+
+struct Layout { int screenW=0, screenH=0; int hudH=0; int simHpx=0; };
+
+static Layout computeLayout(SDL_Renderer* ren) {
+  Layout L;
+  SDL_GetRendererOutputSize(ren, &L.screenW, &L.screenH);
+  L.hudH = std::max(40, L.screenH/18);
+  L.simHpx = L.screenH - L.hudH;
+  return L;
+}
+
+// tiny 8x8 glyphs
+static const uint8_t* glyph8(char c) {
+  static const uint8_t BLANK[8]  = {0,0,0,0,0,0,0,0};
+
+  static const uint8_t COMMA[8]  = {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x10};
+  static const uint8_t DASH[8]   = {0x00,0x00,0x00,0x7E,0x00,0x00,0x00,0x00};
+  static const uint8_t WAVE[8]   = {0x00,0x00,0x52,0x2A,0x15,0x0A,0x00,0x00};
+  static const uint8_t EQ[8]     = {0x00,0x00,0x7E,0x00,0x7E,0x00,0x00,0x00};
+  static const uint8_t HASH[8]   = {0x00,0x24,0x7E,0x24,0x24,0x7E,0x24,0x00};
+  static const uint8_t PCT[8]    = {0x00,0x62,0x64,0x08,0x10,0x26,0x46,0x00};
+  static const uint8_t AT[8]     = {0x00,0x3C,0x42,0x5A,0x5A,0x40,0x3C,0x00};
+
+  static const uint8_t TGRASS[8] = {0x24,0x24,0x24,0x00,0x00,0x00,0x00,0x00}; // "
+  static const uint8_t SHRUB[8]  = {0x00,0x24,0x7E,0x24,0x24,0x7E,0x24,0x00}; // #
+  static const uint8_t TREE1[8]  = {0x10,0x38,0x54,0x10,0x10,0x10,0x38,0x00}; // T
+  static const uint8_t TREE2[8]  = {0x10,0x38,0x54,0x10,0x10,0x28,0x44,0x00}; // Y
+  static const uint8_t PALM[8]   = {0x10,0x54,0x38,0x10,0x10,0x10,0x38,0x00}; // P
+  static const uint8_t MUSH[8]   = {0x00,0x3C,0x7E,0x7E,0x18,0x18,0x3C,0x00}; // m
+  static const uint8_t FLOW1[8]  = {0x10,0x54,0x38,0x7C,0x38,0x54,0x10,0x00}; // +
+  static const uint8_t FLOW2[8]  = {0x00,0x10,0x38,0x7C,0x38,0x10,0x00,0x00}; // f
+  static const uint8_t BIGF[8]   = {0x28,0x7C,0xFE,0x7C,0xFE,0x7C,0x28,0x00}; // &
+  static const uint8_t SUPERB[8] = {0x10,0x7C,0xFE,0x7C,0xFE,0x7C,0x10,0x00}; // !
+  static const uint8_t FERN[8]   = {0x10,0x38,0x10,0x38,0x10,0x28,0x44,0x00}; // ;
+  static const uint8_t REED[8]   = {0x10,0x10,0x10,0x10,0x28,0x28,0x00,0x00}; // :
+  static const uint8_t STONE[8]  = {0x00,0x18,0x3C,0x7E,0x7E,0x3C,0x18,0x00}; // ^
+  static const uint8_t FRUIT[8]  = {0x18,0x24,0x42,0x5A,0x7E,0x24,0x18,0x00}; // $
+  static const uint8_t STAR[8]   = {0x00,0x24,0x18,0x7E,0x18,0x24,0x00,0x00}; // *
+  static const uint8_t EX[8]     = {0x00,0x42,0x24,0x18,0x18,0x24,0x42,0x00}; // x
+  static const uint8_t MUD[8]    = {0x00,0x00,0x3C,0x66,0x5A,0x66,0x3C,0x00}; // d
+  static const uint8_t BOUL[8]   = {0x00,0x3C,0x7E,0xDB,0xFF,0xE7,0x7E,0x3C}; // B
+  static const uint8_t MOUN[8]   = {0x10,0x38,0x7C,0xFE,0x7C,0x38,0x10,0x00}; // M
+  static const uint8_t LILY[8]   = {0x00,0x38,0x7C,0xFE,0xEE,0x7C,0x38,0x00}; // l
+
+  static const uint8_t BUG[8]    = {0x00,0x18,0x3C,0x5A,0x3C,0x18,0x00,0x00}; // b
+  static const uint8_t BIRD[8]   = {0x00,0x00,0x42,0x24,0x18,0x00,0x00,0x00}; // v
+  static const uint8_t RAB[8]    = {0x18,0x3C,0x66,0x42,0x42,0x66,0x24,0x00}; // r
+  static const uint8_t SNAKE[8]  = {0x00,0x7E,0x40,0x7E,0x02,0x7E,0x00,0x00}; // s
+  static const uint8_t GLOW[8]   = {0x00,0x18,0x3C,0x7E,0x3C,0x18,0x00,0x00}; // F
+  static const uint8_t OWL[8]    = {0x3C,0x7E,0xDB,0xFF,0xBD,0xDB,0x7E,0x3C}; // O
+  static const uint8_t YETI[8]   = {0x3C,0x7E,0xFF,0xDB,0xFF,0xDB,0x7E,0x3C}; // H
+  static const uint8_t AYY[8]    = {0x00,0x18,0x24,0x42,0x7E,0x42,0x42,0x00}; // A
+
+  static const uint8_t SLASH[8]  = {0x02,0x04,0x08,0x10,0x20,0x40,0x80,0x00};
+  static const uint8_t BSLASH[8] = {0x80,0x40,0x20,0x10,0x08,0x04,0x02,0x00};
+  static const uint8_t PIPE[8]   = {0x18,0x18,0x18,0x18,0x18,0x18,0x18,0x18};
+
+  switch (c) {
+    case ',': return COMMA;
+    case '-': return DASH;
+    case '~': return WAVE;
+    case '=': return EQ;
+    case '#': return HASH;
+    case '%': return PCT;
+    case '@': return AT;
+
+    case '"': return TGRASS;
+    case 'T': return TREE1;
+    case 'Y': return TREE2;
+    case 'P': return PALM;
+    case 'm': return MUSH;
+    case '+': return FLOW1;
+    case 'f': return FLOW2;
+    case '&': return BIGF;
+    case '!': return SUPERB;
+    case ';': return FERN;
+    case ':': return REED;
+    case '^': return STONE;
+    case '$': return FRUIT;
+    case '*': return STAR;
+    case 'x': return EX;
+    case 'd': return MUD;
+    case 'B': return BOUL;
+    case 'M': return MOUN;
+    case 'l': return LILY;
+
+    case 'b': return BUG;
+    case 'v': return BIRD;
+    case 'r': return RAB;
+    case 's': return SNAKE;
+    case 'F': return GLOW;
+    case 'O': return OWL;
+    case 'H': return YETI;
+    case 'A': return AYY;
+
+    case '/': return SLASH;
+    case '\\': return BSLASH;
+    case '|': return PIPE;
+
+    default: return BLANK;
+  }
+}
+
+struct GlyphCache {
+  std::unordered_map<char, SDL_Texture*> tex;
+
+  void destroy() {
+    for (auto& kv : tex) SDL_DestroyTexture(kv.second);
+    tex.clear();
+  }
+
+  SDL_Texture* makeGlyph(SDL_Renderer* ren, char c) {
+    SDL_Texture* t = SDL_CreateTexture(ren, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 8, 8);
+    if (!t) return nullptr;
+    SDL_SetTextureBlendMode(t, SDL_BLENDMODE_BLEND);
+
+    void* pixels=nullptr; int pitch=0;
+    if (SDL_LockTexture(t, nullptr, &pixels, &pitch) != 0) {
+      SDL_DestroyTexture(t);
+      return nullptr;
+    }
+
+    for (int y=0; y<8; ++y) {
+      uint32_t* px = (uint32_t*)((uint8_t*)pixels + y*pitch);
+      for (int x=0; x<8; ++x) px[x] = 0x00000000;
+    }
+
+    const uint8_t* g = glyph8(c);
+    for (int y=0; y<8; ++y) {
+      uint32_t* px = (uint32_t*)((uint8_t*)pixels + y*pitch);
+      uint8_t bits = g[y];
+      for (int x=0; x<8; ++x) {
+        bool on = (bits & (0x80u >> x)) != 0;
+        if (on) px[x] = 0xE0FFFFFF;
+      }
+    }
+
+    SDL_UnlockTexture(t);
+    return t;
+  }
+
+  SDL_Texture* get(SDL_Renderer* ren, char c) {
+    auto it = tex.find(c);
+    if (it != tex.end()) return it->second;
+    SDL_Texture* t = makeGlyph(ren, c);
+    if (t) tex[c] = t;
+    return t;
+  }
+};
+
+struct RGB { uint8_t r,g,b; };
+
+static inline void applySeasonTint(uint8_t& r, uint8_t& g, uint8_t& b, Season s, float p) {
+  struct Off { int dr,dg,db; };
+  auto offsFor = [&](Season ss)->Off{
+    switch (ss) {
+      case SPRING: return Off{-4, +18, -4};
+      case SUMMER: return Off{+8, +10, +0};
+      case AUTUMN: return Off{+22, -2, -10};
+      case WINTER: return Off{-12, -8, +12};
+    }
+    return Off{0,0,0};
+  };
+  Season s2 = (Season)((s+1)%4);
+  Off a = offsFor(s), b2 = offsFor(s2);
+
+  float t=p;
+  int rr = int(r) + int(a.dr*(1.f-t) + b2.dr*t);
+  int gg = int(g) + int(a.dg*(1.f-t) + b2.dg*t);
+  int bb = int(b) + int(a.db*(1.f-t) + b2.db*t);
+
+  if (s==WINTER || s2==WINTER) {
+    int gray = (rr+gg+bb)/3;
+    float wgt = (s==WINTER) ? (0.35f + 0.35f*t) : (0.35f*(1.f-t));
+    rr = int(rr*(1.f-wgt) + gray*wgt);
+    gg = int(gg*(1.f-wgt) + gray*wgt);
+    bb = int(bb*(1.f-wgt) + gray*wgt);
+  }
+
+  r = clampU8(rr); g=clampU8(gg); b=clampU8(bb);
+}
+
+static inline void vividify(uint8_t& R, uint8_t& G, uint8_t& B) {
+  float r = R/255.f, g = G/255.f, b = B/255.f;
+  float L = (r+g+b)/3.f;
+  r = L + (r-L)*VIVID_SAT;
+  g = L + (g-L)*VIVID_SAT;
+  b = L + (b-L)*VIVID_SAT;
+  r *= VIVID_VAL; g *= VIVID_VAL; b *= VIVID_VAL;
+  R = clampU8((int)(r*255.f));
+  G = clampU8((int)(g*255.f));
+  B = clampU8((int)(b*255.f));
+}
+
+static inline void pastelWash(uint8_t& R, uint8_t& G, uint8_t& B, float amt) {
+  const int wr = 248, wg = 246, wb = 240;
+  R = clampU8((int)(R*(1.f-amt) + wr*amt));
+  G = clampU8((int)(G*(1.f-amt) + wg*amt));
+  B = clampU8((int)(B*(1.f-amt) + wb*amt));
+}
+
+static inline char terrainGlyphVariant(char t, uint32_t h, Season s, const Weather& we) {
+  uint32_t k = h & 7u;
+  if (t=='f' || t=='+' || t=='&' || t=='!') {
+    if ((s==SPRING || we.state==RAIN || we.state==STORM) && k==0) return '!';
+    if (k==1) return '&';
+    if (k==2) return '+';
+    return t;
+  }
+  return t;
+}
+
+static inline char renderCharAt(const World& w, int x, int y) {
+  char e = w.entities[y][x];
+  if (e != ' ') {
+    if (e=='D') return 'r';
+    if (e=='Q') return 'T';
+    return e;
+  }
+
+  for (int ay=y-1; ay<=y; ++ay) for (int ax=x-1; ax<=x; ++ax) {
+    if (!inBounds(ax,ay)) continue;
+    if (w.entities[ay][ax]=='D') {
+      int dx = x-ax, dy = y-ay;
+      if (dx>=0 && dx<2 && dy>=0 && dy<2) {
+        if ((dx^dy)==0) return 'r';
+        return 'v';
+      }
+    }
+  }
+
+  for (int ay=y-1; ay<=y+1; ++ay) for (int ax=x-1; ax<=x+1; ++ax) {
+    if (!inBounds(ax,ay)) continue;
+    if (w.entities[ay][ax]=='Q') {
+      int dx=x-ax, dy=y-ay;
+      if (dx>=-1 && dx<=1 && dy>=-1 && dy<=1) {
+        return ((dx+dy)&1) ? 'Y' : 'T';
+      }
+    }
+  }
+
+  char o = w.overlay[y][x];
+  if (o != ' ') return o;
+
+  uint8_t d = w.water[y][x];
+  if (d>0) {
+    // shallow-water lily pads (visual only)
+    if (d <= 2 && w.entities[y][x]==' ' && w.overlay[y][x]==' ') {
+      uint32_t hh = hash3((uint32_t)x,(uint32_t)y, 555u);
+      if ((hh % 13u)==0u) return 'l';
+      if ((hh % 97u)==0u) return 'f';
+    }
+    return waterGlyph(d);
+  }
+
+  return w.terrain[y][x];
+}
+
+static RGB baseBgFor(const World& w, int x, int y, int tick, Season s, float sp) {
+  uint32_t h = hash3((uint32_t)x, (uint32_t)y, (uint32_t)(tick/8));
+  auto jit = [&](int base, int amt)->uint8_t {
+    int j = (int)(h & 7u) - 3;
+    int v = base + j*amt;
+    return clampU8(v);
+  };
+
+  RGB c{0,0,0};
+
+  bool deerCell=false;
+  for (int ay=y-1; ay<=y && !deerCell; ++ay) for (int ax=x-1; ax<=x && !deerCell; ++ax) {
+    if (!inBounds(ax,ay)) continue;
+    if (w.entities[ay][ax]=='D') {
+      int dx=x-ax, dy=y-ay;
+      if (dx>=0 && dx<2 && dy>=0 && dy<2) deerCell=true;
+    }
+  }
+
+  char ent = w.entities[y][x];
+  if (ent!=' ' || deerCell) {
+    char e = ent;
+    if (deerCell) e='D';
+    switch (e) {
+      case 'b': c={150,140,90}; break;
+      case 'v': c={120,120,140}; break;
+      case 'r': c={150,130,110}; break;
+      case 's': c={90,110,90}; break;
+      case 'F': c={18,12,6}; break;
+      case 'O': c={18,18,24}; break;
+      case 'H': c={22,22,28}; break;
+      case 'A': c={55,55,18}; break;
+      case 'D': c={90,75,60}; break;
+      case 'Q': c={16,34,16}; break;
+      default:  c={70,70,70}; break;
+    }
+    applySeasonTint(c.r,c.g,c.b,s,sp);
+    vividify(c.r,c.g,c.b);
+    return c;
+  }
+
+  uint8_t d = w.water[y][x];
+  if (d>0) {
+    c = { (uint8_t)(16 + d*2), (uint8_t)(24 + d*3), (uint8_t)(72 + d*13) };
+    applySeasonTint(c.r,c.g,c.b,s,sp);
+    vividify(c.r,c.g,c.b);
+    return c;
+  }
+
+  char t = w.terrain[y][x];
+  switch (t) {
+    case '.': c={0,0,0}; break;
+    case ',': {
+      if (w.biome==MEADOW) {
+        uint32_t hh = hash3((uint32_t)x,(uint32_t)y, 777u);
+        float hueShift = ((hh & 255u) / 255.0f - 0.5f) * 0.25f;
+        int baseR = 90, baseG = 170, baseB = 95;
+        int rr = baseR + int(50 * hueShift) + ((int)((hh>>8)&7)-3)*2;
+        int gg = baseG + int(40 * hueShift) + ((int)((hh>>11)&7)-3)*2;
+        int bb = baseB + int(60 * hueShift) + ((int)((hh>>14)&7)-3)*2;
+        c = { clampU8(rr), clampU8(gg), clampU8(bb) };
+      } else {
+        c={ jit(26,2), jit(82,3), jit(26,2) };
+      }
+    } break;
+    case '"': {
+      if (w.biome==MEADOW) {
+        uint32_t hh = hash3((uint32_t)x,(uint32_t)y, 778u);
+        float hueShift = ((hh & 255u) / 255.0f - 0.5f) * 0.22f;
+        int baseR = 105, baseG = 190, baseB = 105;
+        int rr = baseR + int(35 * hueShift) + ((int)((hh>>8)&7)-3)*2;
+        int gg = baseG + int(25 * hueShift) + ((int)((hh>>11)&7)-3)*2;
+        int bb = baseB + int(40 * hueShift) + ((int)((hh>>14)&7)-3)*2;
+        c = { clampU8(rr), clampU8(gg), clampU8(bb) };
+      } else {
+        c={ jit(30,2), jit(110,4), jit(30,2) };
+      }
+    } break;
+    case '#': c={ jit(28,2), jit(64,3), jit(28,2) }; break;
+    case 'T': c={ jit(16,1), jit(56,3), jit(16,1) }; break;
+    case 'Y': c={ jit(16,1), jit(52,3), jit(20,1) }; break;
+    case 'P': c={ jit(26,2), jit(96,4), jit(26,2) }; break;
+    case 'm': c={ jit(98,4), jit(72,3), jit(38,2) }; break;
+    case 'f': c={ jit(90,3), jit(54,2), jit(120,5) }; break;
+    case '+': c={ jit(130,4), jit(110,3), jit(40,2) }; break;
+    case '&': c={ jit(110,4), jit(80,3), jit(145,6) }; break;
+    case '!': c={ jit(160,6), jit(120,5), jit(180,7) }; break;
+    case ';': c={ jit(40,2), jit(120,4), jit(52,2) }; break;
+    case ':': c={ jit(44,2), jit(128,4), jit(80,3) }; break;
+    case '^': c={ jit(60,2), jit(60,2), jit(70,2) }; break;
+    case '$': c={ jit(80,3), jit(120,4), jit(90,3) }; break;
+    case '*': c={ jit(160,6), jit(70,4), jit(20,2) }; break;
+    case 'x': c={ jit(70,2), jit(58,2), jit(45,2) }; break;
+    default:  c={18,18,18}; break;
+  }
+
+  applySeasonTint(c.r,c.g,c.b,s,sp);
+  vividify(c.r,c.g,c.b);
+  pastelWash(c.r,c.g,c.b, 0.22f);
+  return c;
+}
+
+static RGB fgForChar(const World& w, char c, Season s, float sp, int tick, int x, int y) {
+  RGB fg{245,245,245};
+
+  // painterly flower palette for meadow (more variance + pastels)
+  if (w.biome==MEADOW && (c=='f' || c=='+' || c=='&' || c=='!')) {
+    uint32_t hh = hash3((uint32_t)x, (uint32_t)y, 991u);
+    switch (hh % 10u) {
+      case 0: fg={255,140,180}; break;
+      case 1: fg={255,210,80};  break;
+      case 2: fg={180,120,255}; break;
+      case 3: fg={255,160,90};  break;
+      case 4: fg={140,200,255}; break;
+      case 5: fg={255,110,110}; break;
+      case 6: fg={255,255,255}; break;
+      case 7: fg={200,255,140}; break;
+      case 8: fg={255,190,240}; break;
+      case 9: fg={210,170,255}; break;
+    }
+  }
+
+  if (c=='F') {
+    fg = nightish(tick) ? RGB{255,255,130} : RGB{200,200,110};
+  } else if (c=='O') fg = {220, 240, 255};
+  else if (c=='H') fg = {245, 245, 255};
+  else if (c=='A') fg = {255, 255, 210};
+  else if (c=='P') fg = {230, 255, 230};
+  else if (c=='d') fg = {255, 245, 235};
+  else if (c=='B') fg = {235, 235, 240};
+  else if (c=='M') fg = {235, 245, 255};
+  else if (c=='l') fg = {235, 255, 235};
+  else if (c=='m') fg = {255, 240, 215};
+  else if (c=='f') fg = {255, 210, 255};
+  else if (c=='+') fg = {255, 250, 200};
+  else if (c=='&') fg = {255, 230, 255};
+  else if (c=='!') fg = {255, 245, 255};
+  else if (c==';') fg = {220, 255, 220};
+  else if (c==':') fg = {220, 255, 240};
+  else if (c=='^') fg = {220, 220, 235};
+  else if (c=='$') fg = {210, 255, 210};
+  else if (c=='~' || c=='=' || c=='#' || c=='%' || c=='@' || c=='-') fg = {210, 245, 255};
+  else if (c=='/' || c=='\\' || c=='|') fg = {210, 230, 255};
+  else if (c=='*') fg = {255, 220, 180};
+  else if (c=='x') fg = {210, 200, 200};
+  else if (c=='b') fg = {255, 255, 245};
+  else if (c=='v') fg = {235, 235, 255};
+  else if (c=='r') fg = {245, 235, 225};
+  else if (c=='s') fg = {230, 255, 230};
+
+  applySeasonTint(fg.r, fg.g, fg.b, s, sp);
+  vividify(fg.r, fg.g, fg.b);
+  pastelWash(fg.r, fg.g, fg.b, 0.10f);
+  return fg;
+}
+
+static inline void applyCloudShadow(RGB& bg, uint8_t cloudVal) {
+  float c = cloudVal / 255.f;
+  float shadow = 1.0f - c * 0.42f;
+  bg.r = clampU8((int)(bg.r * shadow));
+  bg.g = clampU8((int)(bg.g * shadow));
+  bg.b = clampU8((int)(bg.b * shadow));
+}
+
+static inline void applyCloudLayer(SDL_Renderer* ren, const SDL_Rect& rc, uint8_t cloudVal) {
+  if (cloudVal < 120) return;
+  float c = (cloudVal - 120) / 135.f;
+  c = std::clamp(c, 0.f, 1.f);
+  uint8_t alpha = (uint8_t)(c * 90);
+  setColor(ren, 180, 190, 210, alpha);
+  SDL_RenderFillRect(ren, &rc);
+}
+
+static void render(SDL_Renderer* ren, const Layout& L, World& w, GlyphCache& gc, int tick) {
+  Season s = seasonAt(tick);
+  float sp = seasonLerp(tick);
+
+  setColor(ren, 0,0,0);
+  SDL_RenderClear(ren);
+
+  for (int y=0; y<H; ++y) {
+    int y0 = (y * L.simHpx) / H;
+    int y1 = ((y+1) * L.simHpx) / H;
+    int hpx = std::max(1, y1 - y0);
+
+    for (int x=0; x<W; ++x) {
+      int x0 = (x * L.screenW) / W;
+      int x1 = ((x+1) * L.screenW) / W;
+      int wpx = std::max(1, x1 - x0);
+
+      SDL_Rect rc{ x0, y0, wpx, hpx };
+
+      RGB bg = baseBgFor(w, x, y, tick, s, sp);
+      uint8_t cloud = sampleCloud(w.clouds, x, y);
+      applyCloudShadow(bg, cloud);
+
+      setColor(ren, bg.r, bg.g, bg.b);
+      SDL_RenderFillRect(ren, &rc);
+
+      char c = renderCharAt(w, x, y);
+
+      if (c=='.' && w.water[y][x]==0 && w.entities[y][x]==' ' && w.overlay[y][x]==' ') {
+        applyCloudLayer(ren, rc, cloud);
+        continue;
+      }
+
+      if (w.entities[y][x]==' ' && w.overlay[y][x]==' ' && w.water[y][x]==0) {
+        uint32_t h = hash3((uint32_t)x, (uint32_t)y, (uint32_t)(tick/6));
+        c = terrainGlyphVariant(c, h, s, w.weather);
+      }
+
+      SDL_Texture* gt = gc.get(ren, c);
+      if (gt) {
+        RGB fg = fgForChar(w, c, s, sp, tick, x, y);
+
+        if ((w.terrain[y][x]==',' || w.terrain[y][x]=='"') && w.wind.strength>0) {
+          uint32_t h = hash3((uint32_t)x,(uint32_t)y,(uint32_t)(tick/3));
+          if (h & 1u) {
+            fg.g = clampU8((int)fg.g + 20);
+            fg.r = clampU8((int)fg.r + 5);
+          }
+        }
+
+        if ((c=='/'||c=='\\'||c=='|') && (w.weather.state==STORM)) {
+          fg.r = clampU8(fg.r + 30);
+          fg.g = clampU8(fg.g + 30);
+          fg.b = clampU8(fg.b + 30);
+        }
+
+        SDL_SetTextureColorMod(gt, fg.r, fg.g, fg.b);
+        SDL_RenderCopy(ren, gt, nullptr, &rc);
+      }
+
+      applyCloudLayer(ren, rc, cloud);
+    }
+  }
+
+  SDL_Rect hud{0, L.simHpx, L.screenW, L.hudH};
+  setColor(ren, 8,8,10);
+  SDL_RenderFillRect(ren, &hud);
+
+  SDL_RenderPresent(ren);
+}
+
+// ---------------- CLI ----------------
+static Biome parseBiome(int argc, char** argv) {
+  for (int i=1; i<argc; ++i) {
+    if (std::strcmp(argv[i], "--biome")==0 && i+1<argc) {
+      std::string s = argv[i+1];
+      if (s=="meadow") return MEADOW;
+      if (s=="wetland") return WETLAND;
+      if (s=="alpine") return ALPINE;
+      if (s=="alien") return ALIEN;
+      if (s=="tropical") return TROPICAL;
+    }
+  }
+  return MEADOW;
+}
+
+static const char* weatherName(WeatherState st) {
+  switch (st) {
+    case CLEAR: return "clear";
+    case OVERCAST: return "overcast";
+    case RAIN: return "rain";
+    case STORM: return "storm";
+  }
+  return "clear";
+}
+static const char* seasonName(Season s) {
+  switch (s) {
+    case SPRING: return "spring";
+    case SUMMER: return "summer";
+    case AUTUMN: return "autumn";
+    case WINTER: return "winter";
+  }
+  return "spring";
+}
+
+int main(int argc, char** argv) {
+  if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+    std::cerr << "SDL_Init failed: " << SDL_GetError() << "\n";
+    return 1;
+  }
+
+  bool startFullscreen = true;
+  for (int i=1; i<argc; ++i) {
+    if (std::strcmp(argv[i], "--windowed")==0) startFullscreen = false;
+    if (std::strcmp(argv[i], "--fullscreen")==0) startFullscreen = true;
+  }
+
+  Uint32 wflags = SDL_WINDOW_SHOWN | SDL_WINDOW_RESIZABLE;
+  if (startFullscreen) wflags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+
+  SDL_Window* win = SDL_CreateWindow(
+    "Terrarium 0.32",
+    SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+    1280, 720,
+    wflags
+  );
+  if (!win) {
+    std::cerr << "SDL_CreateWindow failed: " << SDL_GetError() << "\n";
+    SDL_Quit();
+    return 1;
+  }
+
+  SDL_Renderer* ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_ACCELERATED);
+  if (!ren) ren = SDL_CreateRenderer(win, -1, SDL_RENDERER_SOFTWARE);
+  if (!ren) {
+    std::cerr << "SDL_CreateRenderer failed: " << SDL_GetError() << "\n";
+    SDL_DestroyWindow(win);
+    SDL_Quit();
+    return 1;
+  }
+
+  SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
+
+  uint32_t seed = (uint32_t)std::chrono::high_resolution_clock::now().time_since_epoch().count();
+  Rng r(seed);
+
+  Biome biome = parseBiome(argc, argv);
+
+  World world;
+  seedWorld(world, r, biome);
+
+  GlyphCache gc;
+  Layout layout = computeLayout(ren);
+
+  bool running=true, paused=false;
+  int tps=DEFAULT_TPS;
+  int tick=0;
+  std::string banner="calm";
+
+  auto last = std::chrono::steady_clock::now();
+
+  while (running) {
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+      if (e.type == SDL_QUIT) running=false;
+      if (e.type == SDL_KEYDOWN) {
+        switch (e.key.keysym.sym) {
+          case SDLK_ESCAPE: running=false; break;
+          case SDLK_SPACE: paused=!paused; break;
+          case SDLK_PERIOD:
+            if (paused) { step(world, r, banner, tick); tick++; }
+            break;
+          case SDLK_LEFTBRACKET: if (tps>1) tps--; break;
+          case SDLK_RIGHTBRACKET: if (tps<30) tps++; break;
+          case SDLK_r:
+            seed = (uint32_t)std::chrono::high_resolution_clock::now().time_since_epoch().count();
+            r = Rng(seed);
+            seedWorld(world, r, biome);
+            tick=0; banner="reset";
+            break;
+          case SDLK_F11: {
+            Uint32 flags = SDL_GetWindowFlags(win);
+            bool fs = (flags & SDL_WINDOW_FULLSCREEN_DESKTOP) != 0;
+            SDL_SetWindowFullscreen(win, fs ? 0 : SDL_WINDOW_FULLSCREEN_DESKTOP);
+            layout = computeLayout(ren);
+          } break;
+          default: break;
+        }
+      }
+      if (e.type == SDL_WINDOWEVENT &&
+          (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
+           e.window.event == SDL_WINDOWEVENT_RESIZED ||
+           e.window.event == SDL_WINDOWEVENT_DISPLAY_CHANGED)) {
+        layout = computeLayout(ren);
+      }
+    }
+
+    auto now = std::chrono::steady_clock::now();
+    auto dtMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - last).count();
+    const int msPerTick = 1000 / std::max(1, tps);
+
+    if (!paused && dtMs >= msPerTick) {
+      last = now;
+      step(world, r, banner, tick);
+      tick++;
+    }
+
+    Season s = seasonAt(tick);
+    std::string title =
+      std::string("Terrarium 0.32 | biome ") + biomeName(biome) +
+      " | " + std::to_string(W) + "x" + std::to_string(H) +
+      " | tick " + std::to_string(tick) +
+      " | " + (paused ? "PAUSED" : ("tps " + std::to_string(tps))) +
+      " | " + seasonName(s) +
+      " | weather " + weatherName(world.weather.state) +
+      " (" + std::to_string((int)(world.weather.rainStrength*100)) + "%)" +
+      " | wind " + std::to_string(world.wind.strength) +
+      " | " + banner +
+      " | SPACE pause  . step  [ ] speed  r reset  F11 fullscreen  ESC quit";
+    SDL_SetWindowTitle(win, title.c_str());
+
+    render(ren, layout, world, gc, tick);
+    SDL_Delay(6);
+  }
+
+  gc.destroy();
+  SDL_DestroyRenderer(ren);
+  SDL_DestroyWindow(win);
+  SDL_Quit();
+  return 0;
+}
