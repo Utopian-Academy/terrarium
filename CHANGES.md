@@ -1,5 +1,25 @@
 # Terrarium changes
 
+## 2026-07-18 — nature-vivid color pass (standalone, plugin, pico)
+
+Ported from Deckboy's embedded terrarium (the owner: scenes read faded/pastel,
+pinks read Lisa Frank — should be vibrant and life-evoking, and read as
+*nature*):
+
+- **Flowers** draw from wildflower tones instead of bubblegum: meadow gets
+  poppy/marigold/orchid/thistle/white/cornflower; tropical trades hot pink
+  for hibiscus red; wetland's pale lavenders deepen to iris and marsh-orchid
+  violets. Alpine keeps its edelweiss whites.
+- **Mushrooms** are forest-floor caps (cream, tan, fly-agaric red) instead of
+  candy pink / lilac / baby blue.
+- **Vivid pass pushes harder**: `VIVID_SAT` 1.18 → 1.32, `VIVID_VAL`
+  1.08 → 1.10.
+- **Pico** (1 px/cell): flowers were two flat pinks; now a per-cell hash
+  picks from five wildflower colors, and mushrooms rotate cream/tan/red-cap.
+
+Standalone and the DPF plugin share `terrarium_visuals.cpp`, so both get the
+palette; pico's inline palette updated to match.
+
 ## 2026-07-16 (night) — patch persistence + Terrarium as a plugin
 
 ### Patch persistence

@@ -81,8 +81,8 @@ static constexpr int MAX_WIND = 5;
 
 enum WeatherState { CLEAR=0, OVERCAST=1, RAIN=2, STORM=3 };
 
-static constexpr float VIVID_SAT = 1.18f;  // slightly richer (bg is black)
-static constexpr float VIVID_VAL = 1.08f;  // a touch brighter
+static constexpr float VIVID_SAT = 1.32f;  // rich, life-evoking (bg is black)
+static constexpr float VIVID_VAL = 1.10f;  // a touch brighter
 
 static constexpr int BUG_CAP_BASE      = (W * H) / 75;
 static constexpr int BIRD_CAP_BASE     = (W * H) / 260;

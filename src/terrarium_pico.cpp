@@ -106,9 +106,24 @@ uint32_t cellColor(const World& w, int x, int y, int tick) {
       case '#': r = 36 + j; g = 96 + j; b = 52; break;
       case ':': r = 66 + j; g = 150 + j; b = 96; break;
       case 'T': case 'Y': case 'P': r = 30; g = 84 + j; b = 40; break;
-      case 'm': r = 205 + j; g = 170; b = 165; break;
-      case 'f': case '+': r = 235; g = 150 + j; b = 170; break;
-      case '&': case '!': r = 225; g = 120 + j; b = 210; break;
+      case 'm':  // forest-floor caps: cream / tan / fly-agaric red
+        switch ((h >> 5) % 3u) {
+          case 0:  r = 230 + j; g = 210; b = 185; break;
+          case 1:  r = 195 + j; g = 160; b = 120; break;
+          default: r = 205; g = 70 + j; b = 55; break;
+        }
+        break;
+      case 'f': case '+': case '&': case '!':
+        // Wildflower mix per-cell (was flat bubblegum pink/magenta):
+        // poppy, marigold, orchid, white, cornflower.
+        switch ((h >> 5) % 5u) {
+          case 0:  r = 225; g = 70 + j; b = 55; break;
+          case 1:  r = 255; g = 215 + j; b = 90; break;
+          case 2:  r = 175; g = 120 + j; b = 235; break;
+          case 3:  r = 248; g = 246; b = 238; break;
+          default: r = 120; g = 190 + j; b = 250; break;
+        }
+        break;
       case '$': r = 220; g = 190 + j; b = 90; break;
       case 'd': case 'e': case 'g': r = 105 + j; g = 70; b = 44; break;
       case '^': case 'B': r = 130 + j; g = 130 + j; b = 142; break;

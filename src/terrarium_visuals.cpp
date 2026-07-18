@@ -319,9 +319,11 @@ RGB colorFlower(Biome biome, uint32_t hash, char glyph) {
   RGB color{255, 255, 255};
   switch (biome) {
     case TROPICAL:
+      // Hibiscus red, not hot pink — wildflower tones read nature; bubblegum
+      // reads candy (same fix as Deckboy's embedded terrarium).
       color = pickAndJitter(hash,
-                            {{255, 80, 120}, {255, 140, 60}, {255, 220, 60},
-                             {140, 220, 255}, {190, 120, 255}},
+                            {{235, 60, 50}, {255, 140, 40}, {255, 215, 40},
+                             {90, 200, 255}, {175, 95, 235}},
                             7);
       break;
     case ALPINE:
@@ -332,9 +334,10 @@ RGB colorFlower(Biome biome, uint32_t hash, char glyph) {
                             4);
       break;
     case WETLAND:
+      // Iris and marsh-orchid violets — deeper than the old pale lavenders.
       color = pickAndJitter(hash,
-                            {{180, 150, 255}, {140, 200, 255},
-                             {200, 170, 255}, {170, 220, 255},
+                            {{150, 95, 240}, {80, 165, 250},
+                             {175, 110, 235}, {110, 200, 250},
                              {240, 240, 255}},
                             5);
       break;
@@ -352,11 +355,13 @@ RGB colorFlower(Biome biome, uint32_t hash, char glyph) {
                             7);
       break;
     default:
+      // Meadow wildflowers: poppy, marigold, orchid, thistle — the old baby
+      // pinks turned the field Lisa Frank.
       color = pickAndJitter(hash,
-                            {{255, 160, 190}, {255, 220, 120},
-                             {200, 170, 255}, {160, 220, 255},
-                             {255, 190, 140}, {255, 120, 150},
-                             {245, 245, 245}, {210, 255, 160}},
+                            {{225, 70, 55}, {255, 215, 90},
+                             {175, 120, 235}, {120, 190, 250},
+                             {255, 165, 70}, {190, 80, 170},
+                             {248, 246, 238}, {195, 235, 120}},
                             6);
       break;
   }
@@ -465,10 +470,11 @@ bool tryColorFloraGlyph(const World& world, char glyph, uint32_t hash,
                             5);
       return true;
     case 'm':
+      // Forest-floor caps (cream, tan, fly-agaric red), not candy buttons.
       color = pickAndJitter(hash,
-                            {{230, 210, 190}, {210, 180, 220},
-                             {255, 150, 180}, {200, 245, 255},
-                             {255, 240, 170}},
+                            {{230, 210, 185}, {195, 160, 120},
+                             {205, 70, 55}, {235, 225, 205},
+                             {225, 190, 130}},
                             4);
       return true;
     case 'f':
