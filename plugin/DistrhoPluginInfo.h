@@ -5,7 +5,10 @@
 #define DISTRHO_PLUGIN_URI     "https://github.com/utopian-academy/terrarium"
 #define DISTRHO_PLUGIN_CLAP_ID "academy.utopian.terrarium"
 
-#define DISTRHO_PLUGIN_HAS_UI            0
+#define DISTRHO_PLUGIN_HAS_UI            1
+#define DISTRHO_UI_USER_RESIZABLE        1
+#define DISTRHO_UI_DEFAULT_WIDTH         600
+#define DISTRHO_UI_DEFAULT_HEIGHT        600
 #define DISTRHO_PLUGIN_IS_RT_SAFE        0
 #define DISTRHO_PLUGIN_IS_SYNTH          0
 #define DISTRHO_PLUGIN_NUM_INPUTS        0

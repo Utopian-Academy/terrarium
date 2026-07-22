@@ -1,5 +1,19 @@
 # Terrarium changes
 
+## 2026-07-22 — plugin UI: see the vat (+ Windows build)
+
+- **The plugin shows the environment now.** A resizable editor window renders
+  the living world 1px-per-cell (the pico renderer, factored into a shared
+  `terrarium_pixelview.hpp`) — nearest-neighbour scaled, cloud shadows,
+  day/night, wildflower colors and all. The DSP renders the frame after each
+  sim tick, only while an editor is open; the UI just uploads a texture, so
+  tps stays the repaint rate. Works in VST3 and CLAP (single-binary formats);
+  LV2 splits UI and DSP into separate modules and stays dark for now.
+- Whole repo now builds on Windows/MSVC (standalone, pico, and all three
+  plugin formats): `NOMINMAX` + legacy `near`/`far` macro undefs, `_mkdir`
+  include, SDL2 via CMake config package instead of pkg-config, and
+  `SDL_MAIN_HANDLED` for pico.
+
 ## 2026-07-18 — nature-vivid color pass (standalone, plugin, pico)
 
 Ported from Deckboy's embedded terrarium (the owner: scenes read faded/pastel,

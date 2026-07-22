@@ -2,6 +2,8 @@
 // runs the ecosystem simulation on a sample clock inside the host and emits
 // the same notes + CC streams as the standalone app. Route its MIDI output
 // to any instrument (Serum, etc.) and MIDI-learn knobs from the mod matrix.
+// The editor window shows the living world (see TerrariumUI.cpp) — that's
+// the whole point: you watch the vat that's playing your synth.
 //
 // The plugin loads the same patch file the standalone edits
 // (~/.config/terrarium/patch.txt), so you design the matrix in the app with
@@ -14,6 +16,9 @@
 #include "terrarium_audio.hpp"
 #include "terrarium_app.hpp"
 #include "terrarium_patch.hpp"
+#include "terrarium_pixelview.hpp"
+
+#include "TerrariumShared.hpp"
 
 #include "DistrhoPlugin.hpp"
 
@@ -85,7 +90,7 @@ protected:
   }
   const char* getMaker() const override { return "Utopian Academy"; }
   const char* getLicense() const override { return "ISC"; }
-  uint32_t getVersion() const override { return d_version(0, 7, 0); }
+  uint32_t getVersion() const override { return d_version(0, 7, 1); }
   int64_t getUniqueId() const override { return d_cconst('T', 'e', 'r', 'a'); }
 
   void initParameter(uint32_t index, Parameter& parameter) override {
@@ -283,6 +288,26 @@ private:
                    heldNote3_, rootKey_, (ScaleType)scale_, params_);
     g_stepEvents.clear();
     sendModMatrixMidi(sink_);
+
+    // Feed the UI (1px per cell, same renderer as terrarium-pico). Skipped
+    // entirely while no editor is open; ~200x200 cheap cells when one is.
+    if (g_terrariumView.viewers.load(std::memory_order_acquire) > 0) {
+      std::lock_guard<std::mutex> lk(g_terrariumView.mutex);
+      auto& px = g_terrariumView.pixels;
+      px.resize((size_t)W * H);
+      for (int y = 0; y < H; ++y) {
+        for (int x = 0; x < W; ++x) {
+          PixelviewRGB c = pixelviewCellColor(world_, x, y, tick_);
+          px[(size_t)y * W + x] = (uint32_t)c.r | ((uint32_t)c.g << 8) |
+                                  ((uint32_t)c.b << 16) | 0xFF000000u;
+        }
+      }
+      g_terrariumView.tick.store(tick_, std::memory_order_relaxed);
+      g_terrariumView.biome.store(biome_, std::memory_order_relaxed);
+      g_terrariumView.weather.store((int)world_.weather.state,
+                                    std::memory_order_relaxed);
+      g_terrariumView.dirty.store(true, std::memory_order_release);
+    }
 
     for (const auto& msg : sink_.queue) {
       MidiEvent ev;

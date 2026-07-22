@@ -120,6 +120,8 @@ if(TERRARIUM_BUILD_PLUGIN)
         src/terrarium_core.cpp
         src/terrarium_audio.cpp
         src/terrarium_patch.cpp
+      FILES_UI
+        plugin/TerrariumUI.cpp
     )
     target_include_directories(terrarium-vat PUBLIC plugin src)
   else()
