@@ -194,11 +194,9 @@ int main(int argc, char** argv) {
       SDL_RenderClear(ren);
       if (opt.fullscreen) {
         // Fullscreen drives a specific physical panel: keep the world
-        // unstretched at scale and pin it to the TOP-RIGHT of the output
+        // unstretched at scale and pin it to the TOP-LEFT of the output
         // (the region the panel actually shows), rest stays black.
-        int outW = 0, outH = 0;
-        SDL_GetRendererOutputSize(ren, &outW, &outH);
-        SDL_Rect dst{outW - W * opt.scale, 0, W * opt.scale, H * opt.scale};
+        SDL_Rect dst{0, 0, W * opt.scale, H * opt.scale};
         SDL_RenderCopy(ren, frame, nullptr, &dst);
       } else {
         SDL_RenderCopy(ren, frame, nullptr, nullptr);
