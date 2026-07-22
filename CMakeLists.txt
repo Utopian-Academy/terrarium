@@ -15,8 +15,17 @@ configure_file(
   @ONLY
 )
 
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(SDL2 REQUIRED sdl2)
+if(WIN32)
+  # vcpkg / MSVC: pkg-config resolves the debug SDL2 lib even in Release;
+  # use SDL2's CMake config package instead.
+  find_package(SDL2 CONFIG REQUIRED)
+  set(SDL2_LIBRARIES $<IF:$<TARGET_EXISTS:SDL2::SDL2>,SDL2::SDL2,SDL2::SDL2-static>)
+  set(SDL2_INCLUDE_DIRS "")
+  set(SDL2_CFLAGS_OTHER "")
+else()
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(SDL2 REQUIRED sdl2)
+endif()
 
 add_executable(terrarium
   src/main.cpp
@@ -49,7 +58,9 @@ target_compile_options(terrarium PRIVATE
 
 # Real MIDI output (ALSA sequencer port) so Terrarium can play external
 # synths/VST hosts. Optional: without it the MidiOut stub is compiled.
-pkg_check_modules(ALSA alsa)
+if(NOT WIN32)
+  pkg_check_modules(ALSA alsa)
+endif()
 if(ALSA_FOUND)
   target_compile_definitions(terrarium PRIVATE TERRARIUM_HAS_ALSA)
   target_include_directories(terrarium PRIVATE ${ALSA_INCLUDE_DIRS})
@@ -62,7 +73,7 @@ add_executable(terrarium-pico
   src/terrarium_pico.cpp
   src/terrarium_core.cpp
 )
-target_compile_definitions(terrarium-pico PRIVATE TERRA_W=200 TERRA_H=200)
+target_compile_definitions(terrarium-pico PRIVATE TERRA_W=200 TERRA_H=200 SDL_MAIN_HANDLED)
 target_include_directories(terrarium-pico PRIVATE ${SDL2_INCLUDE_DIRS})
 target_link_libraries(terrarium-pico PRIVATE ${SDL2_LIBRARIES})
 target_compile_options(terrarium-pico PRIVATE

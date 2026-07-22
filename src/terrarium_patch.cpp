@@ -4,6 +4,9 @@
 #include <cstring>
 #include <sys/stat.h>
 #include <sys/types.h>
+#ifdef _WIN32
+#include <direct.h>  // _mkdir
+#endif
 
 std::string defaultPatchPath() {
 #ifdef _WIN32

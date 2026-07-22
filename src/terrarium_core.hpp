@@ -33,9 +33,19 @@
 // NOTE: deliberately no SDL include here — the sim core is platform-free so
 // it can be reused by the plugin build (see plugin/).
 #ifdef _WIN32
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+  #endif
+  #ifndef NOMINMAX
+    #define NOMINMAX  // keep std::min/std::max usable
+  #endif
   #include <windows.h>
   #include <mmsystem.h>
   #pragma comment(lib, "winmm.lib")
+  // windef.h defines legacy near/far as empty macros; the sim uses them as
+  // ordinary identifiers.
+  #undef near
+  #undef far
 #endif
 #include <algorithm>
 #include <array>
