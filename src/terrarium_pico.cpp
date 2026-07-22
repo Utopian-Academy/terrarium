@@ -20,6 +20,18 @@
 
 #include <SDL.h>
 
+#ifndef _WIN32
+// Kiosk remote control (no keyboard attached): SIGUSR1 = reseed,
+// SIGUSR2 = next biome. Sent by the `vat` helper over SSH.
+#include <csignal>
+static volatile sig_atomic_t g_sigReseed = 0;
+static volatile sig_atomic_t g_sigNextBiome = 0;
+static void onControlSignal(int sig) {
+  if (sig == SIGUSR1) g_sigReseed = 1;
+  else g_sigNextBiome = 1;
+}
+#endif
+
 namespace {
 
 struct PicoOptions {
@@ -116,6 +128,11 @@ int main(int argc, char** argv) {
   std::string banner = "calm";
   Uint32 lastTickMs = SDL_GetTicks();
 
+#ifndef _WIN32
+  std::signal(SIGUSR1, onControlSignal);
+  std::signal(SIGUSR2, onControlSignal);
+#endif
+
   auto doTick = [&]() {
     step(world, rng, banner, tick);
     g_stepEvents.clear();  // no audio consumer in the pico build
@@ -135,6 +152,23 @@ int main(int argc, char** argv) {
   while (running) {
 #ifdef TERRA_PICO_PROF
     double profT0 = profClock();
+#endif
+#ifndef _WIN32
+    if (g_sigReseed) {  // same as the 'r' key
+      g_sigReseed = 0;
+      rng = Rng(++seed);
+      seedWorld(world, rng, world.biome);
+      tick = 0;
+      dirty = true;
+    }
+    if (g_sigNextBiome) {  // same as the 'b' key
+      g_sigNextBiome = 0;
+      Biome nb = (Biome)(((int)world.biome + 1) % BIOME_COUNT);
+      rng = Rng(++seed);
+      seedWorld(world, rng, nb);
+      tick = 0;
+      dirty = true;
+    }
 #endif
     SDL_Event ev;
     while (SDL_PollEvent(&ev)) {
