@@ -152,10 +152,15 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick) {
     else if (season == SPRING) { g += 8; }
     else if (snowy) {
       r = (int)(r * 0.90f) + 14; g = (int)(g * 0.92f) + 12; b += 22;
-      // Sparse snow cover that thickens through the season.
-      uint32_t sh = hash3((uint32_t)x, (uint32_t)y, 0x534E4F57u);
-      float cover = 0.20f + 0.35f * seasonLerp(tick);
-      if ((float)(sh & 1023u) / 1023.0f < cover) { r = 226; g = 232; b = 244; }
+      // Snow settles on open ground and grass; trees and shrubs just take
+      // the frost tint above (snowy pine forest, not white-out).
+      bool ground = (t == ',' || t == '"' || t == ';' || t == '.' ||
+                     t == ':' || t == 's');
+      if (ground) {
+        uint32_t sh = hash3((uint32_t)x, (uint32_t)y, 0x534E4F57u);
+        float cover = 0.10f + 0.22f * seasonLerp(tick);
+        if ((float)(sh & 1023u) / 1023.0f < cover) { r = 226; g = 232; b = 244; }
+      }
     }
   }
 

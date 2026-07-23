@@ -65,6 +65,9 @@ PicoOptions parseArgs(int argc, char** argv) {
     } else if (a == "--daynight") {
       std::string m = next();
       g_daynightMode = (m == "clock") ? 2 : (m == "off") ? 0 : 1;
+    } else if (a == "--seasons") {
+      std::string m = next();
+      g_seasonMode = (m == "daily") ? 1 : (m == "real") ? 2 : 0;
     }
   }
   return o;

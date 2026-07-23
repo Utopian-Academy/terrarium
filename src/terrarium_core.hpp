@@ -438,6 +438,10 @@ struct Daylight {
 extern int g_daynightMode;
 Daylight daylightNow(int tick);
 
+// Season pacing: 0 = sim ticks (a "year" in minutes), 1 = one season per
+// real day (four-day year — good kiosk rhythm), 2 = the actual calendar.
+extern int g_seasonMode;
+
 // Display brightness 0.05..1.0, live-controlled by the kiosk remote: reads
 // ~/.terrarium-brightness (single float) at most once a second. Missing
 // file = 1.0. Renderer-only — never affects the sim.

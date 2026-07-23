@@ -47,8 +47,47 @@ static int countNeighborsWater(const Water& w, int x, int y) {
   return n;
 }
 
-Season seasonAt(int tick) { return (Season)((tick / SEASON_TICKS) % 4); }
-float seasonLerp(int tick) { return float(tick % SEASON_TICKS) / float(SEASON_TICKS); }
+int g_seasonMode = 0;  // 0 = sim ticks, 1 = one season per real day, 2 = calendar
+
+static void localNow(std::tm& lt) {
+  std::time_t now = std::time(nullptr);
+#ifdef _WIN32
+  localtime_s(&lt, &now);
+#else
+  localtime_r(&now, &lt);
+#endif
+}
+
+Season seasonAt(int tick) {
+  if (g_seasonMode == 1) {
+    // One season per real day: a four-day year, aligned to local midnight.
+    return (Season)((std::time(nullptr) / 86400) % 4);
+  }
+  if (g_seasonMode == 2) {
+    std::tm lt{}; localNow(lt);
+    int m = lt.tm_mon;  // 0=Jan; northern-hemisphere calendar
+    if (m == 11 || m <= 1) return WINTER;
+    if (m <= 4) return SPRING;
+    if (m <= 7) return SUMMER;
+    return AUTUMN;
+  }
+  return (Season)((tick / SEASON_TICKS) % 4);
+}
+
+float seasonLerp(int tick) {
+  if (g_seasonMode == 1) {
+    std::tm lt{}; localNow(lt);
+    return ((float)lt.tm_hour * 3600.f + (float)lt.tm_min * 60.f +
+            (float)lt.tm_sec) / 86400.f;
+  }
+  if (g_seasonMode == 2) {
+    std::tm lt{}; localNow(lt);
+    int m = lt.tm_mon;
+    int intoSeason = (m == 11) ? 0 : ((m + 1) % 3);  // months into the season
+    return ((float)intoSeason + (float)(lt.tm_mday - 1) / 31.f) / 3.f;
+  }
+  return float(tick % SEASON_TICKS) / float(SEASON_TICKS);
+}
 bool nightish(int tick) { return daylightNow(tick).level < 0.35f; }
 
 int g_daynightMode = 1;
