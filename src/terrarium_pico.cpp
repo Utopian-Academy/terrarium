@@ -307,8 +307,8 @@ int main(int argc, char** argv) {
           kbCy = ay + (by2 - ay) * kf;
           kbZ = az + (bz2 - az) * kf;
         }
-        // Voyage pan: the old world slides out west as the new one arrives.
-        int panOff = 0;
+        // Voyage pan offset (float: sub-pixel smooth).
+        float panOffF = 0.f;
         if (panning) {
           float p = (animT - panStart) / kPanSec;
           if (p >= 1.f) {
@@ -318,36 +318,62 @@ int main(int argc, char** argv) {
             lastDriftMs = SDL_GetTicks();
           } else {
             float e = p * p * (3.f - 2.f * p);  // ease the crossing
-            panOff = (int)(e * (float)W);
+            panOffF = e * (float)W;
           }
         }
-        // Round panel mask: cells outside the inscribed circle stay black
-        // (soft 1px edge so the boundary doesn't stair-step harshly).
+
+        // Pass 1: render each visible world at crisp 1:1 into buffers.
+        static std::vector<uint32_t> baseA((size_t)W * H), baseB((size_t)W * H);
+        for (int y = 0; y < H; ++y)
+          for (int x = 0; x < W; ++x)
+            baseA[(size_t)y * W + x] = cellColor(world, x, y, tick, animT);
+        if (panning)
+          for (int y = 0; y < H; ++y)
+            for (int x = 0; x < W; ++x)
+              baseB[(size_t)y * W + x] = cellColor(nextWorld, x, y, nextTick, animT);
+
+        // Pass 2: camera warp with bilinear sampling — sub-pixel smooth,
+        // no crawling line artifacts from nearest-neighbour zoom.
+        auto sampleBi = [&](const std::vector<uint32_t>& buf, float sx, float sy) {
+          sx = std::clamp(sx, 0.f, (float)W - 1.001f);
+          sy = std::clamp(sy, 0.f, (float)H - 1.001f);
+          int x0 = (int)sx, y0 = (int)sy;
+          float fx2 = sx - (float)x0, fy2 = sy - (float)y0;
+          uint32_t p00 = buf[(size_t)y0 * W + x0];
+          uint32_t p10 = buf[(size_t)y0 * W + x0 + 1];
+          uint32_t p01 = buf[(size_t)(y0 + 1) * W + x0];
+          uint32_t p11 = buf[(size_t)(y0 + 1) * W + x0 + 1];
+          auto ch = [&](int sh) {
+            float a = (float)((p00 >> sh) & 0xFF) * (1.f - fx2) +
+                      (float)((p10 >> sh) & 0xFF) * fx2;
+            float b = (float)((p01 >> sh) & 0xFF) * (1.f - fx2) +
+                      (float)((p11 >> sh) & 0xFF) * fx2;
+            return (uint32_t)(a * (1.f - fy2) + b * fy2);
+          };
+          return 0xFF000000u | (ch(16) << 16) | (ch(8) << 8) | ch(0);
+        };
+
         const float cc = (float)W * 0.5f - 0.5f;
         const float rad = (float)W * 0.5f;
+        const bool warp = (kbZ != 1.f) || panning;
         for (int y = 0; y < H; ++y) {
           uint32_t* row = (uint32_t*)((uint8_t*)pixels + y * pitch);
           for (int x = 0; x < W; ++x) {
-            int srcYkb = y;
-            bool useKbY = false;
-            (void)useKbY;
-            int srcX = x + panOff;
-            const World& srcW = (srcX < W) ? world : nextWorld;
-            int srcT = (srcX < W) ? tick : nextTick;
-            if (srcX >= W) srcX -= W;
-            if (kbZ != 1.f) {  // ken burns warp within the source world
-              float wxf = kbCx + ((float)srcX - (float)W * 0.5f) / kbZ;
+            uint32_t px;
+            if (!warp) {
+              px = baseA[(size_t)y * W + x];
+            } else {
+              float sxf = (float)x + panOffF;
+              const std::vector<uint32_t>& buf = (sxf < (float)W) ? baseA : baseB;
+              if (sxf >= (float)W) sxf -= (float)W;
+              float wxf = kbCx + (sxf - (float)W * 0.5f) / kbZ;
               float wyf = kbCy + ((float)y - (float)H * 0.5f) / kbZ;
-              srcX = std::clamp((int)wxf, 0, W - 1);
-              // note: y sampling handled via srcY below
-              srcYkb = std::clamp((int)wyf, 0, H - 1);
-              useKbY = true;
+              px = sampleBi(buf, wxf, wyf);
             }
             if (opt.circle) {
               float dx = (float)x - cc, dy = (float)y - cc;
               float dist = std::sqrt(dx * dx + dy * dy);
               if (dist > rad) { row[x] = 0xFF000000u; continue; }
-              uint32_t px = cellColor(srcW, srcX, srcYkb, srcT, animT);
               if (dist > rad - 1.5f) {
                 float f = (rad - dist) / 1.5f;
                 uint32_t r8 = (uint32_t)(((px >> 16) & 0xFF) * f);
@@ -355,10 +381,8 @@ int main(int argc, char** argv) {
                 uint32_t b8 = (uint32_t)((px & 0xFF) * f);
                 px = 0xFF000000u | (r8 << 16) | (g8 << 8) | b8;
               }
-              row[x] = px;
-            } else {
-              row[x] = cellColor(srcW, srcX, srcYkb, srcT, animT);
             }
+            row[x] = px;
           }
         }
         SDL_UnlockTexture(frame);
