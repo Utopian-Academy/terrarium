@@ -57,7 +57,7 @@ PicoOptions parseArgs(int argc, char** argv) {
     } else if (a == "--scale") {
       o.scale = std::clamp(std::atoi(next()), 1, 8);
     } else if (a == "--tps") {
-      o.tps = std::clamp(std::atoi(next()), 1, 30);
+      o.tps = std::clamp(std::atoi(next()), 1, 60);
     } else if (a == "--seed") {
       o.seed = (uint32_t)std::strtoul(next(), nullptr, 0);
     } else if (a == "--fullscreen") {
@@ -182,7 +182,7 @@ int main(int argc, char** argv) {
         case SDLK_SPACE: paused = !paused; break;
         case SDLK_PERIOD: if (paused) doTick(); break;
         case SDLK_LEFTBRACKET: if (tps > 1) --tps; break;
-        case SDLK_RIGHTBRACKET: if (tps < 30) ++tps; break;
+        case SDLK_RIGHTBRACKET: if (tps < 60) ++tps; break;
         case SDLK_r:
           rng = Rng(++seed);
           seedWorld(world, rng, world.biome);

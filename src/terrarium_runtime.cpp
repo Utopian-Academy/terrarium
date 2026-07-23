@@ -16,6 +16,7 @@ struct CliOptions {
   bool printVersion = false;
   bool kiosk = false;  // start straight into the world, no menu
   int microFont = 8;   // world glyph size: 8 = full, 4 or 2 = micro marks
+  int startTps = DEFAULT_TPS;
   std::string sf2Path = defaultSf2Path();
   float synthGain = 0.7f;
   std::string synthAudioDriver;
@@ -128,6 +129,8 @@ CliOptions parseCliOptions(int argc, char** argv) {
       options.printVersion = true;
     } else if (std::strcmp(argv[i], "--kiosk") == 0) {
       options.kiosk = true;
+    } else if (std::strcmp(argv[i], "--tps") == 0 && i + 1 < argc) {
+      options.startTps = std::clamp(std::atoi(argv[++i]), 1, 60);
     } else if (std::strcmp(argv[i], "--daynight") == 0 && i + 1 < argc) {
       const char* m = argv[++i];
       g_daynightMode = (std::strcmp(m, "clock") == 0) ? 2
@@ -605,6 +608,7 @@ int runTerrarium(int argc, char** argv) {
   initializeSynth(options, resources);
 
   LoopState loop;
+  loop.tps = options.startTps;
   if (options.kiosk) loop.showMenu = false;
   if (patchLoaded) {
     loop.rootKey = patchRootKey;
