@@ -73,7 +73,11 @@ add_executable(terrarium-pico
   src/terrarium_pico.cpp
   src/terrarium_core.cpp
 )
-target_compile_definitions(terrarium-pico PRIVATE TERRA_W=200 TERRA_H=200 SDL_MAIN_HANDLED)
+# World size for the pico build (one pixel per cell — match your panel;
+# e.g. 136 for a 136px round LED disc).
+set(TERRA_PICO_SIZE 200 CACHE STRING "pico world size in cells/pixels")
+target_compile_definitions(terrarium-pico PRIVATE
+  TERRA_W=${TERRA_PICO_SIZE} TERRA_H=${TERRA_PICO_SIZE} SDL_MAIN_HANDLED)
 target_include_directories(terrarium-pico PRIVATE ${SDL2_INCLUDE_DIRS})
 target_link_libraries(terrarium-pico PRIVATE ${SDL2_LIBRARIES})
 target_compile_options(terrarium-pico PRIVATE

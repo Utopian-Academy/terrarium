@@ -935,6 +935,67 @@ w.biome = biome;
     }
   }
 
+  // Through-rivers: carve a meandering channel from one map edge to the
+  // opposite one, with a monotonic downhill height ramp so gravity carries
+  // the flow ACROSS the world — in from offscreen at the headwater (a
+  // persistent edge spring), out to offscreen at the mouth (edge drain).
+  {
+    int riverCount = 0;
+    switch (biome) {
+      case MEADOW: case ALPINE: case TROPICAL: riverCount = 1 + (r.oneIn(2) ? 1 : 0); break;
+      case ALIEN:   riverCount = r.oneIn(2) ? 1 : 0; break;
+      case WETLAND: riverCount = r.oneIn(3) ? 1 : 0; break;  // slow bayou channel
+      case DESERT:  riverCount = r.oneIn(6) ? 1 : 0; break;  // rare oasis creek
+      default: break;
+    }
+    for (int rv = 0; rv < riverCount; ++rv) {
+      bool horizontal = r.oneIn(2);
+      float px, py, txf, tyf;
+      if (horizontal) { px = 0.f; py = (float)r.i(H/6, H-1-H/6); txf = (float)(W-1); tyf = (float)r.i(H/6, H-1-H/6); }
+      else            { px = (float)r.i(W/6, W-1-W/6); py = 0.f; txf = (float)r.i(W/6, W-1-W/6); tyf = (float)(H-1); }
+      if (r.oneIn(2)) { std::swap(px, txf); std::swap(py, tyf); }  // either direction
+
+      float hStart = 150.f + 40.f * r.u01();
+      float hEnd = 55.f + 20.f * r.u01();
+      float total = std::abs(txf-px) + std::abs(tyf-py);
+      float wanderPhase = r.u01() * 6.28f;
+      float wanderAmp = 2.5f + 3.5f * r.u01();
+      int guard = (int)(total * 3.f) + 64;
+      float traveled = 0.f;
+
+      int sx = (int)px, sy = (int)py;
+      while (guard-- > 0) {
+        int cx = (int)px, cy = (int)py;
+        if (!inBounds(cx, cy)) break;
+        float prog = std::min(1.f, traveled / std::max(1.f, total));
+        uint8_t rampH = (uint8_t)(hStart + (hEnd - hStart) * prog);
+        for (int oy=-2; oy<=2; ++oy) for (int ox=-2; ox<=2; ++ox) {
+          int nx = cx+ox, ny = cy+oy;
+          if (!inBounds(nx, ny)) continue;
+          int man = std::abs(ox) + std::abs(oy);
+          if (man <= 1) {  // channel
+            w.height[ny][nx] = std::min(w.height[ny][nx], rampH);
+            w.water[ny][nx] = std::max<uint8_t>(w.water[ny][nx], man == 0 ? 3 : 2);
+            w.terrain[ny][nx] = '.';
+          } else if (man == 2) {  // banks slope in
+            w.height[ny][nx] = std::min(w.height[ny][nx], (uint8_t)std::min(255, rampH + 14));
+          }
+        }
+        if (cx == (int)txf && cy == (int)tyf) break;
+        float dx = txf - px, dy = tyf - py;
+        float len = std::sqrt(dx*dx + dy*dy);
+        if (len < 1.f) break;
+        dx /= len; dy /= len;
+        float wob = std::sin(traveled * 0.12f + wanderPhase) * wanderAmp * 0.22f;
+        px += dx - dy * wob + (r.u01() - 0.5f) * 0.5f;
+        py += dy + dx * wob + (r.u01() - 0.5f) * 0.5f;
+        traveled += 1.f;
+      }
+      // Headwater feeds forever; mouth drains offscreen via edgeDrain.
+      w.springs.emplace_back(sx, sy);
+    }
+  }
+
 for (int y=0;y<H;++y) for (int x=0;x<W;++x) {
     if (w.water[y][x] > 0) continue;
     uint8_t alt = w.height[y][x];
@@ -1349,7 +1410,13 @@ static void waterSinks(World& w, Rng& r, Season s) {
     // Edge drainage.
     bool nearEdge = (x < 2 || y < 2 || x > W-3 || y > H-3);
     if (nearEdge && d <= 3 && r.u01() < edgeDrain*retain) {
-      d--; 
+      d--;
+      continue;
+    }
+    // The outermost ring is "the world continues offscreen": river mouths
+    // that reach it flow out instead of pooling against an invisible wall.
+    if ((x == 0 || y == 0 || x == W-1 || y == H-1) && r.u01() < 0.05f) {
+      d--;
       continue;
     }
   }

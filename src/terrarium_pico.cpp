@@ -39,7 +39,8 @@ struct PicoOptions {
   int scale = 3;      // window = (W*scale) x (H*scale); use 1 on the Pi
   int tps = DEFAULT_TPS;
   bool fullscreen = false;
-  uint32_t seed = 0;  // 0 = time-based
+  bool circle = false;  // mask to the inscribed circle (round LED panels)
+  uint32_t seed = 0;    // 0 = time-based
 };
 
 PicoOptions parseArgs(int argc, char** argv) {
@@ -62,6 +63,8 @@ PicoOptions parseArgs(int argc, char** argv) {
       o.seed = (uint32_t)std::strtoul(next(), nullptr, 0);
     } else if (a == "--fullscreen") {
       o.fullscreen = true;
+    } else if (a == "--circle") {
+      o.circle = true;
     } else if (a == "--daynight") {
       std::string m = next();
       g_daynightMode = (m == "clock") ? 2 : (m == "off") ? 0 : 1;
@@ -238,10 +241,30 @@ int main(int argc, char** argv) {
       int pitch = 0;
       if (SDL_LockTexture(frame, nullptr, &pixels, &pitch) == 0) {
         float animT = (float)SDL_GetTicks() * 0.001f;
+        // Round panel mask: cells outside the inscribed circle stay black
+        // (soft 1px edge so the boundary doesn't stair-step harshly).
+        const float cc = (float)W * 0.5f - 0.5f;
+        const float rad = (float)W * 0.5f;
         for (int y = 0; y < H; ++y) {
           uint32_t* row = (uint32_t*)((uint8_t*)pixels + y * pitch);
-          for (int x = 0; x < W; ++x)
-            row[x] = cellColor(world, x, y, tick, animT);
+          for (int x = 0; x < W; ++x) {
+            if (opt.circle) {
+              float dx = (float)x - cc, dy = (float)y - cc;
+              float dist = std::sqrt(dx * dx + dy * dy);
+              if (dist > rad) { row[x] = 0xFF000000u; continue; }
+              uint32_t px = cellColor(world, x, y, tick, animT);
+              if (dist > rad - 1.5f) {
+                float f = (rad - dist) / 1.5f;
+                uint32_t r8 = (uint32_t)(((px >> 16) & 0xFF) * f);
+                uint32_t g8 = (uint32_t)(((px >> 8) & 0xFF) * f);
+                uint32_t b8 = (uint32_t)((px & 0xFF) * f);
+                px = 0xFF000000u | (r8 << 16) | (g8 << 8) | b8;
+              }
+              row[x] = px;
+            } else {
+              row[x] = cellColor(world, x, y, tick, animT);
+            }
+          }
         }
         SDL_UnlockTexture(frame);
       }
