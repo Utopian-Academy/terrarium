@@ -65,6 +65,8 @@ struct PixelviewCast {
   float birdX[3], birdY[3];
   bool shipUp = false;
   float shipX, shipY, shipAng;
+  bool pirateUp = false;
+  float pirX, pirY, pirAng;
   bool whaleUp = false;
   float whaleX, whaleY, whaleAge;
   bool serpentUp = false;
@@ -99,6 +101,24 @@ inline PixelviewCast& pixelviewCast(float animT) {
         C.shipX = tx2 + dirx * (-span + age * (2.f * span / 110.f));
         C.shipY = ty2 + diry * (-span + age * (2.f * span / 110.f));
         C.shipAng = std::atan2(diry, dirx);
+      }
+    }
+    // The pirate ship: rarer, on her own schedule, running dark.
+    {
+      uint32_t pep = (uint32_t)(animT / 560.f);
+      uint32_t phh = hash3(pep, 0x9147Eu, 0xB1AC4u);
+      float age = animT - (float)pep * 560.f;
+      C.pirateUp = ((phh % 2u) == 0u) && age < 100.f;
+      if (C.pirateUp) {
+        float th = (float)(phh & 1023u) / 1023.f * 6.283f;
+        float side = ((phh >> 12) & 1u) ? 1.f : -1.f;
+        float tx2 = cc + R * 0.78f * std::cos(th);
+        float ty2 = cc + R * 0.78f * std::sin(th);
+        float dirx = -std::sin(th) * side, diry = std::cos(th) * side;
+        float span = R * 1.35f;
+        C.pirX = tx2 + dirx * (-span + age * (2.f * span / 100.f));
+        C.pirY = ty2 + diry * (-span + age * (2.f * span / 100.f));
+        C.pirAng = std::atan2(diry, dirx);
       }
     }
     uint32_t wep = (uint32_t)(animT / 75.f);
@@ -653,6 +673,29 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
           float p = (0.75f + 0.25f * std::sin(animT * 2.3f)) * br;
           rr = 255.f * p; gg = 185.f * p; bb = 90.f * p;
         }
+      }
+    }
+    if (C.pirateUp && d > 0) {
+      float dxp = fx - C.pirX, dyp = fy - C.pirY;
+      if (dxp * dxp + dyp * dyp < 2.4f) {  // black hull
+        rr = 38.f * br; gg = 34.f * br; bb = 36.f * br;
+      }
+      float sailX = C.pirX - std::sin(C.pirAng) * 1.5f;
+      float sailY = C.pirY + std::cos(C.pirAng) * 1.5f;
+      float dxl = fx - sailX, dyl = fy - sailY;
+      if (dxl * dxl + dyl * dyl < 1.1f) {
+        if (dl.level > 0.35f) {  // dark sails by day
+          rr = 72.f * br; gg = 66.f * br; bb = 78.f * br;
+        } else {  // she runs dark at night — barely a silhouette
+          rr = 30.f * br; gg = 28.f * br; bb = 34.f * br;
+        }
+      }
+      // red pennant above the sail
+      float pnX = sailX - std::sin(C.pirAng) * 1.4f;
+      float pnY = sailY + std::cos(C.pirAng) * 1.4f;
+      float dxn = fx - pnX, dyn = fy - pnY;
+      if (dxn * dxn + dyn * dyn < 0.5f) {
+        rr = 190.f * br; gg = 35.f * br; bb = 30.f * br;
       }
     }
     if (dl.level > 0.5f) {
