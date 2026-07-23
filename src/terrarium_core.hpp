@@ -342,7 +342,7 @@ inline int g_camY = 0;
 inline std::vector<Ripple> g_ripples;
 inline AleaWeights g_alea;
 
-static constexpr int MOD_N = 50;
+static constexpr int MOD_N = 58;
 inline const char* g_modName[MOD_N] = {
   "water_view", "plants_view", "overlay_view", "agents_view", "agent_speed",
   "stress_mean", "stress_hi", "panic_count", "hunger_mean", "thirst_mean",
@@ -353,7 +353,11 @@ inline const char* g_modName[MOD_N] = {
   "hunger_flux", "thirst_flux", "fatigue_flux", "health_flux", "panic_flux",
   "oddity_0", "oddity_1", "oddity_2", "oddity_3", "oddity_4",
   "oddity_5", "oddity_6", "oddity_7", "oddity_8", "oddity_9",
-  "oddity_10", "oddity_11", "oddity_12", "oddity_13", "oddity_14"
+  "oddity_10", "oddity_11", "oddity_12", "oddity_13", "oddity_14",
+  // World-clock and live-sky sources (day/night, seasons-of-the-real-world,
+  // eruptions, actual weather outside the window).
+  "daylight", "golden_hour", "rain_strength", "wave_energy",
+  "eruption", "real_temp", "real_wind", "snowing"
 };
 inline float g_modVal[MOD_N] = {0};
 

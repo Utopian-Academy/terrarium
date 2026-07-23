@@ -550,6 +550,23 @@ void updateModPool(World& w, int tick, int viewW, int viewH){
 static float prev[MOD_N] = {0};
 for(int i=0;i<15;++i) g_modVal[35+i]=clamp01f(odd[i]);
 
+// World-clock and live-sky sources: the vat's day, its volcano, and the
+// actual weather outside the window, all playable through the matrix.
+{
+  Daylight dl = daylightNow(tick);
+  g_modVal[50] = clamp01f(dl.level);
+  g_modVal[51] = clamp01f(std::max(0.f, dl.warm));
+  g_modVal[52] = clamp01f(w.weather.rainStrength);
+  g_modVal[53] = clamp01f(0.6f * g_modVal[16] + 0.4f * w.weather.rainStrength);
+  g_modVal[54] = (w.ventX >= 0 && w.eruptEnd > tick)
+                     ? clamp01f((float)(w.eruptEnd - tick) / 120.f)
+                     : 0.f;
+  const LiveWeather& lw = liveWeatherNow();
+  g_modVal[55] = lw.valid ? clamp01f((lw.temp + 10.f) / 45.f) : 0.5f;
+  g_modVal[56] = lw.valid ? clamp01f(lw.windspeed / 40.f) : g_modVal[16];
+  g_modVal[57] = (lw.valid && lw.snowing) ? 1.f : 0.f;
+}
+
 for(int i=0;i<MOD_N;++i){
   float v = g_modVal[i]*2.0f - 1.0f;      // 0..1 -> -1..+1
   float dv = v - prev[i];
