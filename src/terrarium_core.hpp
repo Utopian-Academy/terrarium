@@ -442,6 +442,11 @@ Daylight daylightNow(int tick);
 // ~/.terrarium-brightness (single float) at most once a second. Missing
 // file = 1.0. Renderer-only — never affects the sim.
 float displayBrightness();
+
+// Ground style for the kiosk: 0 = earth (soft brown soil), 1 = oled (true
+// black — the world floats on an off panel). Reads ~/.terrarium-bg
+// ("earth"/"oled") at most once a second, like displayBrightness().
+int displayBgMode();
 const char* weatherName(WeatherState state);
 const char* seasonName(Season season);
 const char* speciesName(uint8_t s);

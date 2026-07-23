@@ -69,13 +69,48 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick) {
     if (((h >> 4) + (uint32_t)(tick / 6)) % 97u == 0u) { r = g = b = 235; }
   } else {
     tintable = true;
+    // Foliage picks a per-cell green *family* (yellow-green, deep forest,
+    // blue-green, sage) — jitter alone read as one flat green.
+    uint32_t fam = (h >> 6) & 3u;
     switch (t) {
-      case ',': r = 60 + j; g = 140 + j; b = 70; break;
-      case '"': r = 48 + j; g = 126 + j; b = 62; break;
-      case ';': r = 40 + j; g = 110 + j; b = 58; break;
-      case '#': r = 36 + j; g = 96 + j; b = 52; break;
+      case ',':
+        switch (fam) {
+          case 0:  r = 60 + j; g = 140 + j; b = 70; break;
+          case 1:  r = 82 + j; g = 148 + j; b = 56; break;   // yellow-green
+          case 2:  r = 48 + j; g = 130 + j; b = 92; break;   // blue-green
+          default: r = 92 + j; g = 138 + j; b = 78; break;   // sage
+        }
+        break;
+      case '"':
+        switch (fam) {
+          case 0:  r = 48 + j; g = 126 + j; b = 62; break;
+          case 1:  r = 66 + j; g = 132 + j; b = 48; break;
+          case 2:  r = 38 + j; g = 116 + j; b = 82; break;
+          default: r = 74 + j; g = 122 + j; b = 66; break;
+        }
+        break;
+      case ';':
+        r = (fam & 1) ? 52 + j : 40 + j;
+        g = (fam & 1) ? 118 + j : 110 + j;
+        b = (fam & 1) ? 46 : 58;
+        break;
+      case '#':
+        switch (fam) {
+          case 0:  r = 36 + j; g = 96 + j; b = 52; break;
+          case 1:  r = 58 + j; g = 102 + j; b = 40; break;   // olive
+          case 2:  r = 30 + j; g = 88 + j; b = 66; break;    // teal shrub
+          default: r = 48 + j; g = 94 + j; b = 56; break;
+        }
+        break;
       case ':': r = 66 + j; g = 150 + j; b = 96; break;
-      case 'T': case 'Y': case 'P': r = 30; g = 84 + j; b = 40; break;
+      case 'T': case 'Y': case 'P':
+        switch (fam) {
+          case 0:  r = 30; g = 84 + j; b = 40; break;        // forest
+          case 1:  r = 24; g = 74 + j; b = 52; break;        // dark pine
+          case 2:  r = 44; g = 92 + j; b = 36; break;        // warm canopy
+          default: r = 34; g = 88 + j; b = 58; break;        // mossy
+        }
+        break;
       case 'm':  // forest-floor caps: cream / tan / fly-agaric red
         switch ((h >> 5) % 3u) {
           case 0:  r = 230 + j; g = 210; b = 185; break;
@@ -102,7 +137,10 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick) {
       case 'x': r = 70; g = 40; b = 36; break;
       case 's': r = 205 + j; g = 185 + j; b = 130; break;
       case 'c': r = 90; g = 170 + j; b = 100; break;
-      default:  r = 26 + j / 2; g = 22 + j / 2; b = 18; break;  // bare soil
+      default:
+        if (displayBgMode() == 1) { r = g = b = 0; }             // oled: true black
+        else { r = 26 + j / 2; g = 22 + j / 2; b = 18; }         // earth
+        break;
     }
     if (t == KELP_GLYPH) { r = 24; g = 140 + j; b = 110; }
   }

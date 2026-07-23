@@ -95,6 +95,24 @@ Daylight daylightNow(int tick) {
   return d;
 }
 
+int displayBgMode() {
+  static int cached = 0;
+  static std::chrono::steady_clock::time_point lastRead{};
+  auto now = std::chrono::steady_clock::now();
+  if (now - lastRead < std::chrono::seconds(1)) return cached;
+  lastRead = now;
+  const char* home = std::getenv("HOME");
+  if (!home) return cached;
+  std::string path = std::string(home) + "/.terrarium-bg";
+  cached = 0;
+  if (FILE* f = std::fopen(path.c_str(), "r")) {
+    int c = std::fgetc(f);
+    if (c == 'o' || c == 'O') cached = 1;
+    std::fclose(f);
+  }
+  return cached;
+}
+
 float displayBrightness() {
   static float cached = 1.0f;
   static std::chrono::steady_clock::time_point lastRead{};
