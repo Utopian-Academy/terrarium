@@ -12,6 +12,24 @@ struct PixelviewRGB {
   uint8_t r = 0, g = 0, b = 0;
 };
 
+// Ambient mote scheduler: per-cell time offsets so nothing blinks in sync,
+// a sin^2 lifetime envelope so motes fade in and out instead of popping,
+// and an individual flutter rate per mote. Returns 0..1 intensity, or 0
+// when this cell has no mote in its current epoch (sparse is sexy).
+inline float pixelviewMote(uint32_t h, float animT, float lifeSec,
+                           uint32_t density, float flutterHz) {
+  float t = (animT + (float)(h % 1024u) * 0.037f) / lifeSec;
+  uint32_t epoch = (uint32_t)t;
+  float frac = t - (float)epoch;
+  uint32_t sh = hash3(h, epoch * 2654435761u, 0x4D4F5445u);
+  if ((sh % density) != 0u) return 0.f;
+  float env = std::sin(3.14159f * frac);
+  env *= env;
+  float rate = flutterHz * (0.7f + 0.6f * (float)((sh >> 3) & 15u) / 15.f);
+  float fl = 0.75f + 0.25f * std::sin(animT * rate + (float)(sh & 63u));
+  return env * fl;
+}
+
 // Nearest-neighbour cloud sample (the full app does bilinear; not needed at
 // 1px/cell).
 inline uint8_t pixelviewCloudAt(const World& w, int x, int y) {
@@ -270,18 +288,12 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
   float gg = (float)g * bright * (1.f + 0.04f * (dl.warm > 0.f ? dl.warm : 0.f));
   float bb = (float)b * bright * (1.f - 0.18f * dl.warm);
 
-  // Fireflies: warm motes pulsing over the land on non-winter nights in
-  // the living biomes. Each lives a few seconds, then the swarm reshuffles.
+  // Fireflies: sparse warm motes drifting through non-winter nights.
   if (dl.level < 0.30f && season != WINTER && d == 0 && e == ' ' &&
       (w.biome == MEADOW || w.biome == WETLAND || w.biome == TROPICAL)) {
-    uint32_t epoch = (uint32_t)(animT * 0.35f);
-    uint32_t fh = hash3((uint32_t)x, (uint32_t)y,
-                        epoch * 2246822519u ^ w.worldSeed);
-    if ((fh % 900u) == 0u) {
-      float pulse = 0.5f + 0.5f * std::sin(animT * 3.0f + (float)((fh >> 8) & 63u));
-      pulse = pulse * pulse * displayBrightness();
-      rr += 200.f * pulse; gg += 215.f * pulse; bb += 90.f * pulse;
-    }
+    uint32_t fh = hash3((uint32_t)x, (uint32_t)y, 0xF12EF1u ^ w.worldSeed);
+    float p = pixelviewMote(fh, animT, 6.0f, 1600u, 2.0f) * displayBrightness();
+    rr += 200.f * p; gg += 215.f * p; bb += 90.f * p;
   }
 
   // Alpine aurora: slow green/violet curtains wash over the night.
@@ -299,11 +311,9 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
   // Desert night: starlight twinkle, and now and then a shooting star.
   if (w.biome == DESERT && dl.level < 0.25f) {
     float br = displayBrightness();
-    uint32_t epoch = (uint32_t)(animT * 0.25f);
-    uint32_t st = hash3((uint32_t)x, (uint32_t)y, epoch * 2654435761u ^ 0xDE5E27u);
-    if ((st % 1200u) == 0u) {
-      float p = 0.5f + 0.5f * std::sin(animT * 4.0f + (float)(st & 31u));
-      p = p * p * br;
+    uint32_t st = hash3((uint32_t)x, (uint32_t)y, 0xDE5E27u ^ w.worldSeed);
+    {
+      float p = pixelviewMote(st, animT, 5.0f, 1900u, 3.0f) * br;
       rr += 175.f * p; gg += 190.f * p; bb += 220.f * p;
     }
     uint32_t sep = (uint32_t)(animT / 40.0f);
@@ -326,12 +336,12 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
     }
   }
 
-  // Alien night: bioluminescent spores drift slowly upward.
+  // Alien night: sparse bioluminescent spores drift slowly upward.
   if (w.biome == ALIEN && dl.level < 0.35f && d == 0) {
-    uint32_t yy = (uint32_t)((float)y + animT * 2.2f);
+    uint32_t yy = (uint32_t)((float)y + animT * 1.4f);
     uint32_t sp2 = hash3((uint32_t)x, yy, 0xA11E17u ^ w.worldSeed);
-    if ((sp2 % 800u) == 0u) {
-      float p = (0.5f + 0.5f * std::sin(animT * 2.0f + (float)(sp2 & 63u))) *
+    if ((sp2 % 1500u) == 0u) {
+      float p = (0.55f + 0.45f * std::sin(animT * 1.6f + (float)(sp2 & 63u))) *
                 displayBrightness();
       if (sp2 & 64u) { rr += 90.f * p; gg += 200.f * p; bb += 210.f * p; }
       else           { rr += 200.f * p; gg += 80.f * p; bb += 220.f * p; }
@@ -344,11 +354,9 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
     float br = displayBrightness();
     if ((w.biome == MEADOW || w.biome == TROPICAL) && d == 0 && e == ' ' &&
         season != WINTER) {
-      uint32_t epoch = (uint32_t)(animT * 0.5f);
-      uint32_t bh = hash3((uint32_t)x, (uint32_t)y,
-                          epoch * 3266489917u ^ w.worldSeed);
-      if ((bh % 1100u) == 0u) {
-        float p = (0.55f + 0.45f * std::sin(animT * 9.0f + (float)(bh & 63u))) * br;
+      uint32_t bh = hash3((uint32_t)x, (uint32_t)y, 0xB77E12u ^ w.worldSeed);
+      float p = pixelviewMote(bh, animT, 5.0f, 3200u, 3.5f) * br;
+      if (p > 0.f) {
         if (w.biome == MEADOW) {
           switch ((bh >> 8) % 3u) {  // cabbage white, gold, monarch
             case 0:  rr += 190.f * p; gg += 190.f * p; bb += 180.f * p; break;
@@ -370,39 +378,31 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
                        (y > 0 && w.water[y-1][x] > 0) ||
                        (y < H-1 && w.water[y+1][x] > 0);
       if (nearWater) {
-        uint32_t epoch = (uint32_t)(animT * 0.8f);
-        uint32_t dh = hash3((uint32_t)x, (uint32_t)y,
-                            epoch * 2246822519u ^ 0xD2A60Fu);
-        if ((dh % 900u) == 0u) {
-          float p = std::sin(animT * 12.0f + (float)(dh & 31u));
-          p = (p > 0.f ? p * p : 0.f) * br;  // quick darting flashes
-          rr += 60.f * p; gg += 205.f * p; bb += 195.f * p;
-        }
+        uint32_t dh = hash3((uint32_t)x, (uint32_t)y, 0xD2A60Fu ^ w.worldSeed);
+        float p = pixelviewMote(dh, animT, 3.0f, 2400u, 5.0f) * br;
+        rr += 60.f * p; gg += 205.f * p; bb += 195.f * p;
       }
     }
     if (w.biome == DESERT && dl.level > 0.95f) {
       float sh2 = std::sin((float)y * 0.35f + (float)x * 0.07f + animT * 1.6f) *
                   std::sin((float)x * 0.22f - animT * 1.1f);
-      float amp = 5.0f * br;
+      float amp = 3.2f * br;  // barely-there midday waver
       rr += sh2 * amp; gg += sh2 * amp * 0.9f; bb += sh2 * amp * 0.7f;
     }
     if (w.biome == ALPINE && d == 0) {
-      uint32_t epoch = (uint32_t)(animT * 1.2f);
-      uint32_t gh = hash3((uint32_t)x, (uint32_t)y, epoch * 2654435761u ^ 0x911770u);
-      if ((gh % 1500u) == 0u) {
-        float p = std::sin(animT * 10.0f + (float)(gh & 31u));
-        p = (p > 0.f ? p * p * p : 0.f) * br;  // sharp glints
-        rr += 200.f * p; gg += 205.f * p; bb += 215.f * p;
-      }
+      uint32_t gh = hash3((uint32_t)x, (uint32_t)y, 0x911770u ^ w.worldSeed);
+      float p = pixelviewMote(gh, animT, 2.5f, 3600u, 5.0f) * br;
+      p = p * p;  // sharp glints
+      rr += 200.f * p; gg += 205.f * p; bb += 215.f * p;
     }
     if (w.biome == ALIEN && d == 0) {
-      uint32_t epoch = (uint32_t)(animT * 0.4f);
-      uint32_t ph2 = hash3((uint32_t)x, (uint32_t)y, epoch * 3266489917u ^ 0xA71E20u);
-      if ((ph2 % 1300u) == 0u) {
+      uint32_t ph2 = hash3((uint32_t)x, (uint32_t)y, 0xA71E20u ^ w.worldSeed);
+      float p = pixelviewMote(ph2, animT, 7.0f, 3000u, 1.0f) * br;
+      if (p > 0.f) {
         float base = animT * 1.3f + (float)(ph2 & 63u);
-        rr += (60.f + 60.f * std::sin(base)) * br;
-        gg += (60.f + 60.f * std::sin(base + 2.09f)) * br;
-        bb += (60.f + 60.f * std::sin(base + 4.19f)) * br;
+        rr += (60.f + 60.f * std::sin(base)) * p;
+        gg += (60.f + 60.f * std::sin(base + 2.09f)) * p;
+        bb += (60.f + 60.f * std::sin(base + 4.19f)) * p;
       }
     }
   }
