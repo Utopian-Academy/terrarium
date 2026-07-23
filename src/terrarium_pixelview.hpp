@@ -65,10 +65,13 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
     r = 140 + (int)(oh & 0x7F); g = 140 + (int)((oh >> 7) & 0x7F);
     b = 140 + (int)((oh >> 14) & 0x7F);
   } else if (d > 0) {
+    // Layered blues, Surf Sandbox style: pale aqua shallows deepening to
+    // rich navy (was inverted — deep water rendered brighter than shallow).
     int dd = std::min<int>(7, d);
-    r = 14 + dd + j / 2;
-    g = 90 + dd * 12 + j;
-    b = 150 + dd * 13 + j;
+    int sh = 7 - dd;  // shallowness 0..6
+    r = 10 + sh * 4 + j / 2;
+    g = 56 + sh * 14 + j;
+    b = 118 + sh * 15 + j;
     // sparse foam shimmer
     if (((h >> 4) + (uint32_t)(tick / 6)) % 97u == 0u) { r = g = b = 235; }
 
@@ -118,6 +121,12 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
           r = (int)(r + (228 - r) * f);
           g = (int)(g + (238 - g) * f);
           b = (int)(b + (246 - b) * f);
+        } else if (nearShore && crest > 0.05f && crest <= 0.55f) {
+          // Spray: dissolving cloud of bright pixels trailing the break —
+          // the Surf Sandbox signature. Scatter pattern drifts with time.
+          uint32_t sp = hash3((uint32_t)x, (uint32_t)y,
+                              (uint32_t)(animT * 6.0f) * 2654435761u);
+          if ((sp % 6u) == 0u) { r = 205; g = 228; b = 240; }
         } else if (d <= 2 && crest > 0.80f) {
           r += 35; g += 40; b += 38;  // shallow crest sparkle offshore
         }
