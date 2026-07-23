@@ -99,15 +99,18 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
     // sparse foam shimmer
     if (((h >> 4) + (uint32_t)(tick / 6)) % 97u == 0u) { r = g = b = 235; }
 
-    // Water in motion — stagnant reads dead outside wetland/oasis.
-    // Rivers (steep gradient): light bands travel downhill. Open water:
-    // surf — wave crests ride the height contours, so as time advances
-    // they sweep toward the shallows and break white where they land.
-    if (w.biome != WETLAND && w.biome != DESERT) {
+    // Water in motion. Rivers (steep gradient) flow in EVERY biome — a
+    // wetland bayou still runs even though its ponds sit glassy. Open
+    // water gets contour surf except in the stillwater biomes
+    // (wetland/desert), where flat water stays calm on purpose.
+    {
       int gx = 0, gy = 0;
       if (x > 0 && x < W - 1) gx = (int)w.height[y][x-1] - (int)w.height[y][x+1];
       if (y > 0 && y < H - 1) gy = (int)w.height[y-1][x] - (int)w.height[y+1][x];
-      bool river = (std::abs(gx) + std::abs(gy) >= 3) && d <= 3;
+      // >=2 catches the gentle ~0.7/cell ramps of carved through-rivers,
+      // not just steep mountain streams.
+      bool river = (std::abs(gx) + std::abs(gy) >= 2) && d <= 3;
+      bool stillBiome = (w.biome == WETLAND || w.biome == DESERT);
 
       if (river) {
         float fx = (float)((gx > 0) - (gx < 0));
@@ -117,7 +120,7 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
         int lift = (int)(ripple * 14.f);
         r += lift / 2; g += lift; b += lift;
         if (ripple > 0.92f) { r += 50; g += 55; b += 50; }  // whitewater glints
-      } else {
+      } else if (!stillBiome) {
         // Surf: primary crest follows height contours shoreward, a softer
         // wind swell crosses it so open water never looks striped.
         float shorePh = (float)w.height[y][x] * 0.55f - animT * 3.0f;
