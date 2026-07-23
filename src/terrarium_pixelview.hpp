@@ -30,6 +30,91 @@ inline float pixelviewMote(uint32_t h, float animT, float lifeSec,
   return env * fl;
 }
 
+// Shared ocean swell field: three wave components, angular shape noise,
+// slow group envelope (waves arrive in sets). Island mode propagates
+// radially inward; mainland follows the wind. Used by BOTH the deep and
+// the shallows so sets roll continuously from open sea into the break.
+inline float pixelviewSwell(const World& w, int x, int y, float animT,
+                            uint32_t h, float* grpOut) {
+  float base, ang;
+  if (w.island) {
+    float ccx = (float)W * 0.5f - 0.5f;
+    float ddx = (float)x - ccx, ddy = (float)y - ccx;
+    base = std::sqrt(ddx * ddx + ddy * ddy);
+    ang = std::atan2(ddy, ddx);
+  } else {
+    float wx2 = (w.wind.dx == 0 && w.wind.dy == 0) ? 0.8f : (float)w.wind.dx;
+    float wy2 = (w.wind.dx == 0 && w.wind.dy == 0) ? 0.5f : (float)w.wind.dy;
+    base = (float)x * wx2 + (float)y * wy2;
+    ang = 0.13f * (float)x - 0.11f * (float)y;
+  }
+  float s1 = std::sin(0.42f * base + animT * 1.9f +
+                      1.3f * std::sin(ang * 3.f + animT * 0.20f));
+  float s2 = std::sin(0.23f * base + animT * 1.15f +
+                      1.7f * std::sin(ang * 5.f - animT * 0.13f));
+  float s3 = std::sin(0.70f * base + animT * 2.6f + (float)(h & 7u) * 0.22f);
+  float grp = 0.6f + 0.4f * std::sin(0.06f * base + animT * 0.45f +
+                                     0.8f * std::sin(ang * 2.f));
+  if (grpOut) *grpOut = grp;
+  return (0.55f * s1 + 0.30f * s2 + 0.15f * s3) * grp;
+}
+
+// Island cast (ship, seabirds, whale): positions computed once per frame.
+struct PixelviewCast {
+  float t = -1e9f;
+  float birdX[3], birdY[3];
+  float shipX, shipY, shipAng;
+  bool whaleUp = false;
+  float whaleX, whaleY, whaleAge;
+  bool serpentUp = false;
+  float serpX[6], serpY[6];
+};
+inline PixelviewCast& pixelviewCast(float animT) {
+  static PixelviewCast C;
+  if (C.t != animT) {
+    C.t = animT;
+    float cc = (float)W * 0.5f - 0.5f;
+    float R = (float)W * 0.5f;
+    for (int i = 0; i < 3; ++i) {
+      float a = animT * (0.09f + 0.02f * (float)i) + (float)i * 2.09f;
+      float rad = R * (0.52f + 0.05f * std::sin(animT * 0.21f + (float)i));
+      C.birdX[i] = cc + rad * std::cos(a);
+      C.birdY[i] = cc + rad * std::sin(a);
+    }
+    C.shipAng = animT * 0.045f;
+    C.shipX = cc + R * 0.85f * std::cos(C.shipAng);
+    C.shipY = cc + R * 0.85f * std::sin(C.shipAng);
+    uint32_t wep = (uint32_t)(animT / 75.f);
+    uint32_t wh = hash3(wep, 0x37A1Eu, 0x1234u);
+    C.whaleAge = animT - (float)wep * 75.f;
+    C.whaleUp = ((wh % 3u) == 0u) && C.whaleAge < 14.f;
+    if (C.whaleUp) {
+      float wa = (float)((wh >> 4) & 1023u) / 1023.f * 6.283f;
+      float wr = R * (0.68f + 0.14f * (float)((wh >> 14) & 255u) / 255.f);
+      C.whaleX = cc + wr * std::cos(wa);
+      C.whaleY = cc + wr * std::sin(wa);
+    }
+    // Sea serpent: rare, surfaces for half a minute, undulating humps.
+    uint32_t sep2 = (uint32_t)(animT / 160.f);
+    uint32_t sh3 = hash3(sep2, 0x5EA9u, 0x77u);
+    float sAge = animT - (float)sep2 * 160.f;
+    C.serpentUp = ((sh3 % 4u) == 0u) && sAge < 30.f;
+    if (C.serpentUp) {
+      float dir = ((sh3 >> 8) & 1u) ? 1.f : -1.f;
+      float sa = (float)((sh3 >> 4) & 1023u) / 1023.f * 6.283f +
+                 dir * sAge * 0.06f;
+      float srad = R * (0.70f + 0.08f * std::sin(sAge * 0.35f));
+      for (int i = 0; i < 6; ++i) {
+        float aa = sa - dir * (float)i * 0.05f;
+        float rr2 = srad + 1.6f * std::sin(sAge * 1.1f + (float)i * 1.3f);
+        C.serpX[i] = cc + rr2 * std::cos(aa);
+        C.serpY[i] = cc + rr2 * std::sin(aa);
+      }
+    }
+  }
+  return C;
+}
+
 // Nearest-neighbour cloud sample (the full app does bilinear; not needed at
 // 1px/cell).
 inline uint8_t pixelviewCloudAt(const World& w, int x, int y) {
@@ -99,6 +184,17 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
     // sparse foam shimmer
     if (((h >> 4) + (uint32_t)(tick / 6)) % 97u == 0u) { r = g = b = 235; }
 
+    // Coral colonies glow through the shallow water.
+    if (t == 'C' && d <= 3) {
+      switch ((h >> 5) % 4u) {
+        case 0:  r = 235; g = 110; b = 140; break;  // pink
+        case 1:  r = 240; g = 140; b = 70;  break;  // orange
+        case 2:  r = 175; g = 110; b = 220; break;  // violet
+        default: r = 245; g = 205; b = 160; break;  // cream
+      }
+      r -= d * 14; g -= d * 8; b += d * 4;  // seen through the water
+    }
+
     // Water in motion. Rivers (steep gradient) flow in EVERY biome — a
     // wetland bayou still runs even though its ponds sit glassy. Open
     // water gets contour surf except in the stillwater biomes
@@ -121,54 +217,33 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
         r += lift / 2; g += lift; b += lift;
         if (ripple > 0.92f) { r += 50; g += 55; b += 50; }  // whitewater glints
       } else if (!stillBiome && d >= 4) {
-        // Deep ocean: a real swell — three wave components at different
-        // wavelengths/speeds, angular shape noise so crests curve and
-        // stagger, and a slow group envelope so waves arrive in sets.
-        // Island mode propagates radially inward (crests wrap the island);
-        // mainland deeps follow the wind. Crests sharpen, troughs soften
-        // (Gerstner-ish), whitecaps ride the biggest sets.
-        float base, ang;
-        if (w.island) {
-          float ccx = (float)W * 0.5f - 0.5f;
-          float ddx = (float)x - ccx, ddy = (float)y - ccx;
-          base = std::sqrt(ddx * ddx + ddy * ddy);
-          ang = std::atan2(ddy, ddx);
-        } else {
-          float wx2 = (w.wind.dx == 0 && w.wind.dy == 0) ? 0.8f : (float)w.wind.dx;
-          float wy2 = (w.wind.dx == 0 && w.wind.dy == 0) ? 0.5f : (float)w.wind.dy;
-          base = (float)x * wx2 + (float)y * wy2;
-          ang = 0.13f * (float)x - 0.11f * (float)y;
-        }
-        float s1 = std::sin(0.42f * base + animT * 1.9f +
-                            1.3f * std::sin(ang * 3.f + animT * 0.20f));
-        float s2 = std::sin(0.23f * base + animT * 1.15f +
-                            1.7f * std::sin(ang * 5.f - animT * 0.13f));
-        float s3 = std::sin(0.70f * base + animT * 2.6f + (float)(h & 7u) * 0.22f);
-        float grp = 0.6f + 0.4f * std::sin(0.06f * base + animT * 0.45f +
-                                           0.8f * std::sin(ang * 2.f));
-        float swell = (0.55f * s1 + 0.30f * s2 + 0.15f * s3) * grp;
+        // Deep ocean: the shared swell field (see pixelviewSwell), crests
+        // sharpened, whitecaps on the strongest sets.
+        float grp;
+        float swell = pixelviewSwell(w, x, y, animT, h, &grp);
         float crest = swell * std::fabs(swell);  // sharpen up, soften down
         int lift = (int)(crest * 15.f);
         r += lift / 2; g += lift; b += (int)(lift * 1.1f);
-        if (crest > 0.60f) {  // whitecaps on the strongest sets
+        if (crest > 0.60f) {
           float f = (crest - 0.60f) / 0.40f * 0.55f;
           r = (int)(r + (205 - r) * f);
           g = (int)(g + (222 - g) * f);
           b = (int)(b + (238 - b) * f);
         }
       } else if (!stillBiome) {
-        // Shallows: contour surf — crests follow the rising seabed toward
-        // shore (Surf Sandbox), with a soft crossing wind swell.
+        // Shallows: the SAME swell field rolls in from the deep (so sets
+        // cross the depth boundary seamlessly) and hands over to contour
+        // surf as the water thins — breaks pulse when a set arrives.
+        float grp;
+        float swell = pixelviewSwell(w, x, y, animT, h, &grp);
         float shorePh = (float)w.height[y][x] * 0.55f - animT * 3.0f;
-        float wx = (w.wind.dx == 0 && w.wind.dy == 0) ? 1.0f : (float)w.wind.dx;
-        float wy = (w.wind.dx == 0 && w.wind.dy == 0) ? 0.3f : (float)w.wind.dy;
-        float openPh = 0.35f * ((float)x * wx + (float)y * wy) - animT * 1.1f;
         float crest = std::sin(shorePh + 0.5f * std::sin(shorePh * 0.31f + (float)(h & 7u)));
-        float swell = std::sin(openPh);
-        float ripple = 0.7f * crest + 0.4f * swell;
+        float mixS = 0.85f - 0.25f * (float)(d - 1);  // d1: surfy, d3: swelly
+        float ripple = crest * mixS + swell * (1.f - mixS);
 
         int lift = (int)(ripple * 16.f);
         r += lift / 2; g += lift; b += lift;
+        crest *= (0.55f + 0.45f * grp);  // breaks ride the arriving sets
 
         // Breaking: near shore the crest goes foam-white, with a softer
         // spray band just behind it.
@@ -446,10 +521,79 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
     }
   }
 
+  // Island cast: the ship on her endless circuit (lantern-lit at night),
+  // seabirds skimming the shore by day, an occasional whale, and — rarely
+  // — the serpent's humps arcing through the deep.
+  if (w.island) {
+    PixelviewCast& C = pixelviewCast(animT);
+    float br = displayBrightness();
+    float fx = (float)x, fy = (float)y;
+    if (C.serpentUp) {
+      for (int i = 0; i < 6; i += 2) {
+        float dxs = fx - C.serpX[i], dys = fy - C.serpY[i];
+        if (dxs * dxs + dys * dys < (i == 0 ? 2.2f : 1.4f)) {
+          rr = 26.f * br; gg = 62.f * br; bb = 52.f * br;
+          if (i == 0 && dl.level < 0.35f) {  // her eye, by moonlight
+            rr = 200.f * br; gg = 40.f * br; bb = 30.f * br;
+          }
+        }
+      }
+    }
+    if (C.whaleUp) {
+      float dxw = fx - C.whaleX, dyw = fy - C.whaleY;
+      if ((dxw * dxw) / 9.f + (dyw * dyw) / 2.8f < 1.f) {
+        rr = 42.f * br; gg = 52.f * br; bb = 74.f * br;
+      }
+      if (C.whaleAge < 4.f) {  // the spout, fading
+        float sx2 = fx - C.whaleX, sy2 = fy - (C.whaleY - 2.6f);
+        if (sx2 * sx2 + sy2 * sy2 < 1.2f) {
+          float fd = (1.f - C.whaleAge / 4.f) * br;
+          rr = 215.f * fd + rr * (1.f - fd);
+          gg = 228.f * fd + gg * (1.f - fd);
+          bb = 240.f * fd + bb * (1.f - fd);
+        }
+      }
+    }
+    {
+      float dxs = fx - C.shipX, dys = fy - C.shipY;
+      if (dxs * dxs + dys * dys < 2.4f) {  // hull
+        rr = 108.f * br; gg = 76.f * br; bb = 48.f * br;
+      }
+      float sailX = C.shipX - std::sin(C.shipAng) * 1.5f;
+      float sailY = C.shipY + std::cos(C.shipAng) * 1.5f;
+      float dxl = fx - sailX, dyl = fy - sailY;
+      if (dxl * dxl + dyl * dyl < 1.1f) {
+        if (dl.level > 0.35f) {  // sail by day
+          rr = 232.f * br; gg = 232.f * br; bb = 226.f * br;
+        } else {  // lantern by night
+          float p = (0.75f + 0.25f * std::sin(animT * 2.3f)) * br;
+          rr = 255.f * p; gg = 185.f * p; bb = 90.f * p;
+        }
+      }
+    }
+    if (dl.level > 0.5f) {
+      for (int i = 0; i < 3; ++i) {
+        float dxb = fx - C.birdX[i], dyb = fy - C.birdY[i];
+        if (dxb * dxb + dyb * dyb < 0.9f) {
+          float flap = 0.75f + 0.25f * std::sin(animT * 7.f + (float)i * 2.1f);
+          rr = 238.f * flap * br; gg = 240.f * flap * br; bb = 244.f * flap * br;
+        }
+      }
+    }
+  }
+
   // Storm lightning: single-tick global flashes (the sim's strikes were
   // invisible at 1px/cell — the whole sky flickering sells the storm).
   if (w.weather.state == STORM && (hash3((uint32_t)tick, 99u, 7u) % 19u) == 0u) {
     rr = rr * 1.5f + 70.f; gg = gg * 1.5f + 70.f; bb = bb * 1.4f + 60.f;
+  }
+
+  // User contrast (live, from the kiosk remote).
+  float ck = displayContrast();
+  if (ck != 1.0f) {
+    rr = (rr - 128.f) * ck + 128.f;
+    gg = (gg - 128.f) * ck + 128.f;
+    bb = (bb - 128.f) * ck + 128.f;
   }
   return PixelviewRGB{clampU8((int)rr), clampU8((int)gg), clampU8((int)bb)};
 }

@@ -455,6 +455,10 @@ float displayBrightness();
 // black — the world floats on an off panel). Reads ~/.terrarium-bg
 // ("earth"/"oled") at most once a second, like displayBrightness().
 int displayBgMode();
+
+// Display contrast 0.5..1.8 around mid-grey, live via ~/.terrarium-contrast
+// (same polling pattern as brightness). Missing file = 1.0.
+float displayContrast();
 const char* weatherName(WeatherState state);
 const char* seasonName(Season season);
 const char* speciesName(uint8_t s);

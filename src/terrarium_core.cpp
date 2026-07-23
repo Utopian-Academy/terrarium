@@ -152,6 +152,25 @@ int displayBgMode() {
   return cached;
 }
 
+float displayContrast() {
+  static float cached = 1.0f;
+  static std::chrono::steady_clock::time_point lastRead{};
+  auto now = std::chrono::steady_clock::now();
+  if (now - lastRead < std::chrono::seconds(1)) return cached;
+  lastRead = now;
+  const char* home = std::getenv("HOME");
+  if (!home) return cached;
+  std::string path = std::string(home) + "/.terrarium-contrast";
+  if (FILE* f = std::fopen(path.c_str(), "r")) {
+    float v = 1.0f;
+    if (std::fscanf(f, "%f", &v) == 1) cached = std::clamp(v, 0.5f, 1.8f);
+    std::fclose(f);
+  } else {
+    cached = 1.0f;
+  }
+  return cached;
+}
+
 float displayBrightness() {
   static float cached = 1.0f;
   static std::chrono::steady_clock::time_point lastRead{};
@@ -1207,6 +1226,11 @@ for (int y=0;y<H;++y) for (int x=0;x<W;++x) {
           if (t > shoreT + 0.07f)
             w.water[y][x] = (uint8_t)std::max((int)w.water[y][x], r.oneIn(2) ? 1 : 2);
         }
+        // Coral colonies in the sunlit shallows just off the beach.
+        if (t > oceanT - 0.01f && t < oceanT + 0.07f && w.water[y][x] > 0 &&
+            w.water[y][x] <= 3 && r.oneIn(9)) {
+          w.terrain[y][x] = 'C';
+        }
       }
     }
   }
@@ -1512,6 +1536,12 @@ static void stepTerrain(World& w, Rng& r, Season s, int tick) {
     // Beached kelp (water receded) dries out quickly.
     if (c == KELP_GLYPH) {
       if (r.oneIn(12)) next[y][x] = (r.oneIn(2) ? ',' : '.');
+      continue;
+    }
+
+    // Dry coral bleaches into sand over time.
+    if (c == 'C') {
+      if (r.oneIn(160)) next[y][x] = 's';
       continue;
     }
 
