@@ -987,13 +987,21 @@ w.biome = biome;
     for (int o=0;o<oases;++o) {
       int cx=r.i(W/6, W-1-W/6), cy=r.i(H/6, H-1-H/6);
       int rad=r.i(10, 22);
-      for (int y=cy-rad; y<=cy+rad; ++y) for (int x=cx-rad; x<=cx+rad; ++x) {
+      // Wobble the pond boundary — perfect circles read as crop circles
+      // once vegetation traces the moisture contour around them.
+      uint32_t wobSeed = hash3((uint32_t)cx, (uint32_t)cy, w.worldSeed);
+      for (int y=cy-rad-3; y<=cy+rad+3; ++y) for (int x=cx-rad-3; x<=cx+rad+3; ++x) {
         if (!inBounds(x,y)) continue;
         int dx=x-cx, dy=y-cy;
-        if (dx*dx+dy*dy > rad*rad) continue;
-        int d2 = dx*dx+dy*dy;
-        if (d2 < (rad*rad)/3) w.water[y][x] = (uint8_t)std::max<int>(w.water[y][x], 3);
-        else if (d2 < (rad*rad)*2/3) w.water[y][x] = (uint8_t)std::max<int>(w.water[y][x], 2);
+        float ang = std::atan2((float)dy, (float)dx);
+        float wob = 1.f + 0.22f * std::sin(ang * 3.f + (float)(wobSeed & 63u)) +
+                    0.14f * std::sin(ang * 6.f + (float)((wobSeed >> 6) & 63u));
+        float radW = (float)rad * wob;
+        float d2f = (float)(dx*dx+dy*dy);
+        if (d2f > radW*radW) continue;
+        float d2 = d2f, rr2 = radW*radW;
+        if (d2 < rr2/3.f) w.water[y][x] = (uint8_t)std::max<int>(w.water[y][x], 3);
+        else if (d2 < rr2*2.f/3.f) w.water[y][x] = (uint8_t)std::max<int>(w.water[y][x], 2);
         else w.water[y][x] = (uint8_t)std::max<int>(w.water[y][x], 1);
       }
     }
@@ -1783,8 +1791,14 @@ static void stepTerrain(World& w, Rng& r, Season s, int tick) {
     if (c==',') {
       // Desert superbloom: after real rain (live weather) soaks the ground,
       // the desert flowers — and fades again as the moisture decays.
-      if (w.biome==DESERT && w.moist[y][x] > 110 && r.oneIn(400))
-        next[y][x] = (r.oneIn(4) ? '&' : 'f');
+      {
+        // Ragged bloom edge: per-cell threshold jitter so the superbloom
+        // forms organic patches, not a contour ring around round water.
+        uint32_t bh2 = hash3((uint32_t)x, (uint32_t)y, 0xB100E5u);
+        int thresh = 95 + (int)(bh2 % 55u);
+        if (w.biome==DESERT && (int)w.moist[y][x] > thresh && r.oneIn(400))
+          next[y][x] = (r.oneIn(4) ? '&' : 'f');
+      }
       if ((g+tg)>=4 && r.oneIn((int)(90*winterSlow))) next[y][x]='"';
       float flowerScale = (alt > 200) ? 0.35f : 1.0f;
       if (wet>0 && r.u01() < (0.005f * springBoost * rainBoost * w.bw.bloomRate * flowerScale)) {
