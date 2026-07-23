@@ -45,8 +45,14 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
   char t = w.terrain[y][x];
 
   if (e != ' ') {
-    // Agents: warm bright dots so they pop at one pixel.
-    r = 255; g = 230; b = 160;
+    if (isAquatic(e)) {
+      // Sea critters: silvery blue-white, so fish read as fish and not
+      // as bananas bobbing offshore.
+      r = 185; g = 220; b = 250;
+    } else {
+      // Land critters: warm bright dots so they pop at one pixel.
+      r = 255; g = 230; b = 160;
+    }
   } else if (o == '|' || o == '/' || o == '\\') {
     if (snowy) { r = 238; g = 242; b = 250; }  // winter rain falls as snow
     else       { r = 150; g = 190; b = 235; }  // rain streak
