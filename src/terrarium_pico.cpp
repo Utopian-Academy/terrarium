@@ -285,28 +285,10 @@ int main(int argc, char** argv) {
       int pitch = 0;
       if (SDL_LockTexture(frame, nullptr, &pixels, &pitch) == 0) {
         float animT = (float)SDL_GetTicks() * 0.001f;
-        // Ken Burns: in voyage mode the camera slowly pushes in and glides,
-        // easing to a new framing every 75s (documentary about a tiny world).
+        // Camera: pixel-perfect while dwelling (a 1:1 LED panel makes any
+        // fractional zoom inherently soft), cinematic only while traveling —
+        // a gentle push-in swells and settles across the voyage crossing.
         float kbZ = 1.f, kbCx = (float)W * 0.5f, kbCy = (float)H * 0.5f;
-        if (opt.driftMin > 0) {
-          auto kbTarget = [](uint32_t e, float& cx2, float& cy2, float& zz) {
-            uint32_t hh = hash3(e, 0x6B454Eu, 0xB52u);
-            zz = 1.06f + 0.22f * (float)((hh >> 4) & 255u) / 255.f;
-            float span = (float)W * (1.f - 1.f / zz);
-            cx2 = (float)W * 0.5f + ((float)((hh >> 12) & 255u) / 255.f - 0.5f) * span;
-            cy2 = (float)H * 0.5f + ((float)((hh >> 20) & 255u) / 255.f - 0.5f) * span;
-          };
-          float kbT = animT / 75.f;
-          uint32_t ke = (uint32_t)kbT;
-          float kf = kbT - (float)ke;
-          kf = kf * kf * (3.f - 2.f * kf);
-          float ax, ay, az, bx2, by2, bz2;
-          kbTarget(ke, ax, ay, az);
-          kbTarget(ke + 1u, bx2, by2, bz2);
-          kbCx = ax + (bx2 - ax) * kf;
-          kbCy = ay + (by2 - ay) * kf;
-          kbZ = az + (bz2 - az) * kf;
-        }
         // Voyage pan offset (float: sub-pixel smooth).
         float panOffF = 0.f;
         if (panning) {
@@ -319,6 +301,8 @@ int main(int argc, char** argv) {
           } else {
             float e = p * p * (3.f - 2.f * p);  // ease the crossing
             panOffF = e * (float)W;
+            // Push-in that peaks mid-crossing and settles on arrival.
+            kbZ = 1.f + 0.10f * std::sin(p * 3.14159f);
           }
         }
 
