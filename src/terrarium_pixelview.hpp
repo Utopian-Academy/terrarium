@@ -270,6 +270,20 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
   float gg = (float)g * bright * (1.f + 0.04f * (dl.warm > 0.f ? dl.warm : 0.f));
   float bb = (float)b * bright * (1.f - 0.18f * dl.warm);
 
+  // Fireflies: warm motes pulsing over the land on non-winter nights in
+  // the living biomes. Each lives a few seconds, then the swarm reshuffles.
+  if (dl.level < 0.30f && season != WINTER && d == 0 && e == ' ' &&
+      (w.biome == MEADOW || w.biome == WETLAND || w.biome == TROPICAL)) {
+    uint32_t epoch = (uint32_t)(animT * 0.35f);
+    uint32_t fh = hash3((uint32_t)x, (uint32_t)y,
+                        epoch * 2246822519u ^ w.worldSeed);
+    if ((fh % 900u) == 0u) {
+      float pulse = 0.5f + 0.5f * std::sin(animT * 3.0f + (float)((fh >> 8) & 63u));
+      pulse = pulse * pulse * displayBrightness();
+      rr += 200.f * pulse; gg += 215.f * pulse; bb += 90.f * pulse;
+    }
+  }
+
   // Storm lightning: single-tick global flashes (the sim's strikes were
   // invisible at 1px/cell — the whole sky flickering sells the storm).
   if (w.weather.state == STORM && (hash3((uint32_t)tick, 99u, 7u) % 19u) == 0u) {

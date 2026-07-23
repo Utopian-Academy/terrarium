@@ -216,12 +216,16 @@ int main(int argc, char** argv) {
       doTick();
     }
 
-    // Water motion runs on wall-clock time: repaint ~12fps between sim
-    // ticks in biomes with flowing water (wetland/desert stay stillwater
-    // and keep the tick-only redraw the Pi Zero 1 needs).
+    // Water motion and fireflies run on wall-clock time: repaint ~12fps
+    // between sim ticks when either is visible. Stillwater biomes keep the
+    // tick-only redraw the Pi Zero 1 needs — except on firefly nights.
     static Uint32 lastAnimMs = 0;
-    if (!paused && world.biome != WETLAND && world.biome != DESERT &&
-        now - lastAnimMs >= 85) {
+    bool flowingWater = (world.biome != WETLAND && world.biome != DESERT);
+    bool fireflyNight = daylightNow(tick).level < 0.30f &&
+                        seasonAt(tick) != WINTER &&
+                        (world.biome == MEADOW || world.biome == WETLAND ||
+                         world.biome == TROPICAL);
+    if (!paused && (flowingWater || fireflyNight) && now - lastAnimMs >= 85) {
       lastAnimMs = now;
       dirty = true;
     }
