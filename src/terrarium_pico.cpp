@@ -368,19 +368,7 @@ int main(int argc, char** argv) {
               if (sxf >= (float)W) sxf -= (float)W;
               float wxf = kbCx + (sxf - (float)W * 0.5f) / kbZ;
               float wyf = kbCy + ((float)y - (float)H * 0.5f) / kbZ;
-              // 4-tap tent: uniform mild softening while the camera moves.
-              // A single bilinear tap's sharpness beats against the texel
-              // grid at near-1.0 zoom and draws moire rings on noisy
-              // textures (the desert found this immediately).
-              uint32_t s1 = sampleBi(buf, wxf - 0.30f, wyf - 0.30f);
-              uint32_t s2 = sampleBi(buf, wxf + 0.30f, wyf - 0.30f);
-              uint32_t s3 = sampleBi(buf, wxf - 0.30f, wyf + 0.30f);
-              uint32_t s4 = sampleBi(buf, wxf + 0.30f, wyf + 0.30f);
-              auto avg = [&](int sh) {
-                return (((s1 >> sh) & 0xFF) + ((s2 >> sh) & 0xFF) +
-                        ((s3 >> sh) & 0xFF) + ((s4 >> sh) & 0xFF)) / 4u;
-              };
-              px = 0xFF000000u | (avg(16) << 16) | (avg(8) << 8) | avg(0);
+              px = sampleBi(buf, wxf, wyf);
             }
             if (opt.circle) {
               float dx = (float)x - cc, dy = (float)y - cc;
