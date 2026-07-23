@@ -1507,10 +1507,14 @@ static void stepTerrain(World& w, Rng& r, Season s, int tick) {
     }
 
     if (c=='$') {
-      if (s==SUMMER && wet>0 && r.oneIn(180)) {
+      // Fruit ripens and falls year-round (was winter-only decay — fine
+      // with 3-minute seasons, but with day-long seasons a whole summer of
+      // unchecked spread turned the land yellow).
+      if (s==SUMMER && wet>0 && r.oneIn(900)) {
         int nx=x+r.i(-1,1), ny=y+r.i(-1,1);
         if (inBounds(nx,ny) && w.water[ny][nx]==0 && (w.terrain[ny][nx]==',' || w.terrain[ny][nx]==';')) next[ny][nx]='$';
       }
+      if (r.oneIn(350)) next[y][x]='#';
       if (s==WINTER && r.oneIn(80)) next[y][x]='#';
       continue;
     }
@@ -1545,7 +1549,7 @@ static void stepTerrain(World& w, Rng& r, Season s, int tick) {
         next[y][x]=(w.biome==TROPICAL ? (r.oneIn(2)?'P':(r.oneIn(2)?'T':'Y')) : (r.oneIn(2)?'T':'Y'));
       if (wet==0 && r.oneIn((int)(170*winterSlow))) next[y][x]='"';
       if (wet>0 && r.u01() < 0.006f * autumnMush * rainBoost * w.bw.mushChance) next[y][x]='m';
-      if (s==SUMMER && r.oneIn(220) && w.biome!=ALPINE) next[y][x]='$';
+      if (s==SUMMER && r.oneIn(2000) && w.biome!=ALPINE) next[y][x]='$';
       continue;
     }
 
@@ -1562,6 +1566,9 @@ static void stepTerrain(World& w, Rng& r, Season s, int tick) {
         }
       }
       if (wet==0 && r.oneIn((int)(1400*winterSlow))) next[y][x]='#';
+      // Old age takes a tree now and then even on wet ground — in wetland
+      // the dry-ground path above never fires, so forests only ever grew.
+      if (r.oneIn(9000)) next[y][x]='#';
       continue;
     }
 
