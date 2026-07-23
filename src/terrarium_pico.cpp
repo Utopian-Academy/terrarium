@@ -41,6 +41,7 @@ struct PicoOptions {
   bool fullscreen = false;
   bool circle = false;  // mask to the inscribed circle (round LED panels)
   bool island = false;  // radial island worldgen with an ocean ring
+  int driftMin = 0;     // voyage mode: pan to a new biome every N minutes
   uint32_t seed = 0;    // 0 = time-based
 };
 
@@ -68,6 +69,8 @@ PicoOptions parseArgs(int argc, char** argv) {
       o.circle = true;
     } else if (a == "--island") {
       o.island = true;
+    } else if (a == "--drift") {
+      o.driftMin = std::clamp(std::atoi(next()), 0, 1440);
     } else if (a == "--weather") {
       g_weatherMode = (next() == std::string("live")) ? 1 : 0;
     } else if (a == "--daynight") {
@@ -143,6 +146,15 @@ int main(int argc, char** argv) {
   std::string banner = "calm";
   Uint32 lastTickMs = SDL_GetTicks();
 
+  // Voyage mode: every driftMin minutes the view pans to a freshly grown
+  // world in another biome — the porthole becomes a ship's window.
+  World nextWorld;
+  int nextTick = 0;
+  bool panning = false;
+  float panStart = 0.f;
+  Uint32 lastDriftMs = SDL_GetTicks();
+  const float kPanSec = 28.f;
+
 #ifndef _WIN32
   std::signal(SIGUSR1, onControlSignal);
   std::signal(SIGUSR2, onControlSignal);
@@ -150,6 +162,11 @@ int main(int argc, char** argv) {
 
   auto doTick = [&]() {
     step(world, rng, banner, tick);
+    if (panning) {  // the incoming world lives too
+      std::string b2;
+      step(nextWorld, rng, b2, nextTick);
+      nextTick = wrapTick(nextTick + 1);
+    }
     g_stepEvents.clear();  // no audio consumer in the pico build
     tick = wrapTick(tick + 1);
     dirty = true;
@@ -225,6 +242,27 @@ int main(int argc, char** argv) {
       doTick();
     }
 
+    // Voyage: time to set sail for a new biome?
+    if (opt.driftMin > 0 && !panning && !paused &&
+        now - lastDriftMs >= (Uint32)opt.driftMin * 60000u) {
+      static const struct { Biome b; bool isl; } stops[] = {
+          {MEADOW, false},  {WETLAND, false},  {ALPINE, false},
+          {ALIEN, false},   {TROPICAL, false}, {DESERT, false},
+          {TROPICAL, true},  // a new island
+      };
+      int pick;
+      do {
+        pick = (int)(hash3(++seed, 0xD21F7u, 0x5A11u) % 7u);
+      } while (stops[pick].b == world.biome && stops[pick].isl == world.island);
+      nextWorld = World{};
+      nextWorld.island = stops[pick].isl;
+      rng = Rng(++seed);
+      seedWorld(nextWorld, rng, stops[pick].b);
+      nextTick = 0;
+      panning = true;
+      panStart = (float)now * 0.001f;
+    }
+
     // Water motion and fireflies run on wall-clock time: repaint ~12fps
     // between sim ticks when either is visible. Stillwater biomes keep the
     // tick-only redraw the Pi Zero 1 needs — except on firefly nights.
@@ -247,6 +285,42 @@ int main(int argc, char** argv) {
       int pitch = 0;
       if (SDL_LockTexture(frame, nullptr, &pixels, &pitch) == 0) {
         float animT = (float)SDL_GetTicks() * 0.001f;
+        // Ken Burns: in voyage mode the camera slowly pushes in and glides,
+        // easing to a new framing every 75s (documentary about a tiny world).
+        float kbZ = 1.f, kbCx = (float)W * 0.5f, kbCy = (float)H * 0.5f;
+        if (opt.driftMin > 0) {
+          auto kbTarget = [](uint32_t e, float& cx2, float& cy2, float& zz) {
+            uint32_t hh = hash3(e, 0x6B454Eu, 0xB52u);
+            zz = 1.06f + 0.22f * (float)((hh >> 4) & 255u) / 255.f;
+            float span = (float)W * (1.f - 1.f / zz);
+            cx2 = (float)W * 0.5f + ((float)((hh >> 12) & 255u) / 255.f - 0.5f) * span;
+            cy2 = (float)H * 0.5f + ((float)((hh >> 20) & 255u) / 255.f - 0.5f) * span;
+          };
+          float kbT = animT / 75.f;
+          uint32_t ke = (uint32_t)kbT;
+          float kf = kbT - (float)ke;
+          kf = kf * kf * (3.f - 2.f * kf);
+          float ax, ay, az, bx2, by2, bz2;
+          kbTarget(ke, ax, ay, az);
+          kbTarget(ke + 1u, bx2, by2, bz2);
+          kbCx = ax + (bx2 - ax) * kf;
+          kbCy = ay + (by2 - ay) * kf;
+          kbZ = az + (bz2 - az) * kf;
+        }
+        // Voyage pan: the old world slides out west as the new one arrives.
+        int panOff = 0;
+        if (panning) {
+          float p = (animT - panStart) / kPanSec;
+          if (p >= 1.f) {
+            world = std::move(nextWorld);
+            tick = nextTick;
+            panning = false;
+            lastDriftMs = SDL_GetTicks();
+          } else {
+            float e = p * p * (3.f - 2.f * p);  // ease the crossing
+            panOff = (int)(e * (float)W);
+          }
+        }
         // Round panel mask: cells outside the inscribed circle stay black
         // (soft 1px edge so the boundary doesn't stair-step harshly).
         const float cc = (float)W * 0.5f - 0.5f;
@@ -254,11 +328,26 @@ int main(int argc, char** argv) {
         for (int y = 0; y < H; ++y) {
           uint32_t* row = (uint32_t*)((uint8_t*)pixels + y * pitch);
           for (int x = 0; x < W; ++x) {
+            int srcYkb = y;
+            bool useKbY = false;
+            (void)useKbY;
+            int srcX = x + panOff;
+            const World& srcW = (srcX < W) ? world : nextWorld;
+            int srcT = (srcX < W) ? tick : nextTick;
+            if (srcX >= W) srcX -= W;
+            if (kbZ != 1.f) {  // ken burns warp within the source world
+              float wxf = kbCx + ((float)srcX - (float)W * 0.5f) / kbZ;
+              float wyf = kbCy + ((float)y - (float)H * 0.5f) / kbZ;
+              srcX = std::clamp((int)wxf, 0, W - 1);
+              // note: y sampling handled via srcY below
+              srcYkb = std::clamp((int)wyf, 0, H - 1);
+              useKbY = true;
+            }
             if (opt.circle) {
               float dx = (float)x - cc, dy = (float)y - cc;
               float dist = std::sqrt(dx * dx + dy * dy);
               if (dist > rad) { row[x] = 0xFF000000u; continue; }
-              uint32_t px = cellColor(world, x, y, tick, animT);
+              uint32_t px = cellColor(srcW, srcX, srcYkb, srcT, animT);
               if (dist > rad - 1.5f) {
                 float f = (rad - dist) / 1.5f;
                 uint32_t r8 = (uint32_t)(((px >> 16) & 0xFF) * f);
@@ -268,7 +357,7 @@ int main(int argc, char** argv) {
               }
               row[x] = px;
             } else {
-              row[x] = cellColor(world, x, y, tick, animT);
+              row[x] = cellColor(srcW, srcX, srcYkb, srcT, animT);
             }
           }
         }
