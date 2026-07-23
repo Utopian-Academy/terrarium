@@ -1179,6 +1179,37 @@ for (int y=0;y<H;++y) for (int x=0;x<W;++x) {
     }
   }
 
+  // ---- Island shaping (any biome): radial falloff into an ocean ring ----
+  if (w.island) {
+    const float cc = (float)W * 0.5f - 0.5f;
+    const float R = (float)W * 0.5f;
+    for (int y=0; y<H; ++y) for (int x=0; x<W; ++x) {
+      float dx = (float)x - cc, dy = (float)y - cc;
+      float t = std::sqrt(dx*dx + dy*dy) / R;  // 0 centre .. 1 edge
+      // Wobble the coastline so it isn't a perfect circle.
+      float ang = std::atan2(dy, dx);
+      float wob = 0.06f * std::sin(ang * 3.f + (float)(w.worldSeed & 63u)) +
+                  0.04f * std::sin(ang * 7.f + (float)((w.worldSeed >> 6) & 63u));
+      float shoreT = 0.60f + wob;   // where the beach starts
+      float oceanT = shoreT + 0.10f;
+      if (t > shoreT) {
+        float sink = std::min(1.f, (t - shoreT) / 0.18f);
+        int hh = (int)((float)w.height[y][x] * (1.f - sink) + 30.f * sink);
+        w.height[y][x] = (uint8_t)std::max(0, hh);
+        if (t > oceanT) {
+          int depth = 3 + (int)((t - oceanT) / 0.10f * 3.f);
+          w.water[y][x] = (uint8_t)std::min(7, std::max((int)w.water[y][x], depth));
+          w.terrain[y][x] = '.';
+          w.entities[y][x] = ' ';
+        } else if (t > shoreT + 0.04f) {
+          // beach / shallows
+          if (w.water[y][x] == 0 && r.oneIn(3)) w.terrain[y][x] = 's';
+          if (t > shoreT + 0.07f)
+            w.water[y][x] = (uint8_t)std::max((int)w.water[y][x], r.oneIn(2) ? 1 : 2);
+        }
+      }
+    }
+  }
 }
 
 // ---------------- Water flow ----------------
@@ -1206,10 +1237,24 @@ static float biomeWetTarget(Biome b) {
 static void stepWater(World& w, Rng& r) {
   Water next = w.water;
 
+  // Island mode: the map edge is open sea — keep it topped up so the
+  // ocean ring never drains away.
+  if (w.island) {
+    for (int x=0; x<W; ++x) {
+      if (next[0][x] > 0)   next[0][x]   = std::max<uint8_t>(next[0][x], 5);
+      if (next[H-1][x] > 0) next[H-1][x] = std::max<uint8_t>(next[H-1][x], 5);
+    }
+    for (int y=0; y<H; ++y) {
+      if (next[y][0] > 0)   next[y][0]   = std::max<uint8_t>(next[y][0], 5);
+      if (next[y][W-1] > 0) next[y][W-1] = std::max<uint8_t>(next[y][W-1], 5);
+    }
+  }
+
   // Homeostat, source side: springs throttle as the world exceeds its
   // biome's wet target (sinks strengthen in waterSinks — the two together
   // guarantee an equilibrium instead of hoping the tuning balances).
-  const float wetOver = wetFraction(w) - biomeWetTarget(w.biome);
+  const float wetOver = wetFraction(w) -
+      (biomeWetTarget(w.biome) + (w.island ? 0.30f : 0.f));
 
   // Persistent springs: keep rivers/lakes alive long-term.
   if (!w.springs.empty()) {
@@ -1354,7 +1399,8 @@ static void waterSinks(World& w, Rng& r, Season s) {
   // Homeostat, sink side (see stepWater): the wetter the world is beyond
   // its biome's target, the harder evaporation/infiltration/drainage pull.
   {
-    float over = wetFraction(w) - biomeWetTarget(w.biome);
+    float over = wetFraction(w) -
+        (biomeWetTarget(w.biome) + (w.island ? 0.30f : 0.f));
     if (over > 0.f) {
       float boost = 1.0f + 14.0f * over;
       evap *= boost;
@@ -1415,7 +1461,9 @@ static void waterSinks(World& w, Rng& r, Season s) {
     }
     // The outermost ring is "the world continues offscreen": river mouths
     // that reach it flow out instead of pooling against an invisible wall.
-    if ((x == 0 || y == 0 || x == W-1 || y == H-1) && r.u01() < 0.05f) {
+    // (Not in island mode — there the edge IS the open sea.)
+    if (!w.island && (x == 0 || y == 0 || x == W-1 || y == H-1) &&
+        r.u01() < 0.05f) {
       d--;
       continue;
     }

@@ -270,6 +270,10 @@ struct Clouds {
 
 struct World {
   uint32_t worldSeed = 0xC0FFEEu;
+  // Island mode (world-shaper, works with any biome): radial height
+  // falloff into a surrounding ocean ring; map edges act as open sea.
+  // Set once before the first seedWorld — persists across reseeds.
+  bool island = false;
   Grid terrain;
   Grid entities;
   Water water;

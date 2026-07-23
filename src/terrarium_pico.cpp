@@ -40,6 +40,7 @@ struct PicoOptions {
   int tps = DEFAULT_TPS;
   bool fullscreen = false;
   bool circle = false;  // mask to the inscribed circle (round LED panels)
+  bool island = false;  // radial island worldgen with an ocean ring
   uint32_t seed = 0;    // 0 = time-based
 };
 
@@ -65,6 +66,8 @@ PicoOptions parseArgs(int argc, char** argv) {
       o.fullscreen = true;
     } else if (a == "--circle") {
       o.circle = true;
+    } else if (a == "--island") {
+      o.island = true;
     } else if (a == "--daynight") {
       std::string m = next();
       g_daynightMode = (m == "clock") ? 2 : (m == "off") ? 0 : 1;
@@ -130,6 +133,7 @@ int main(int argc, char** argv) {
                                  .count();
   Rng rng(seed);
   World world;
+  world.island = opt.island;
   seedWorld(world, rng, opt.biome);
 
   bool running = true, paused = false, dirty = true;
