@@ -121,20 +121,41 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
         r += lift / 2; g += lift; b += lift;
         if (ripple > 0.92f) { r += 50; g += 55; b += 50; }  // whitewater glints
       } else if (!stillBiome && d >= 4) {
-        // Deep water: calm and textured, never banded — the height field
-        // is flat out here, so contour surf would pulse in giant rings.
-        // Two crossing low swells with per-cell phase noise (Dwarf
-        // Fortress shimmer), plus rare slow glints (Noita highlights).
-        float p1 = std::sin(0.55f * (float)x + 0.35f * (float)y - animT * 0.9f +
-                            (float)(h & 7u) * 0.35f);
-        float p2 = std::sin(0.30f * (float)x - 0.45f * (float)y + animT * 0.6f +
-                            (float)((h >> 3) & 7u) * 0.35f);
-        float swell = 0.6f * p1 + 0.4f * p2;
-        int lift = (int)(swell * 6.f);
-        r += lift / 2; g += lift; b += lift;
-        uint32_t gh2 = hash3((uint32_t)x, (uint32_t)y, 0x0CEA11u ^ w.worldSeed);
-        float gl = pixelviewMote(gh2, animT, 4.0f, 2600u, 2.0f);
-        r += (int)(60.f * gl); g += (int)(70.f * gl); b += (int)(80.f * gl);
+        // Deep ocean: a real swell — three wave components at different
+        // wavelengths/speeds, angular shape noise so crests curve and
+        // stagger, and a slow group envelope so waves arrive in sets.
+        // Island mode propagates radially inward (crests wrap the island);
+        // mainland deeps follow the wind. Crests sharpen, troughs soften
+        // (Gerstner-ish), whitecaps ride the biggest sets.
+        float base, ang;
+        if (w.island) {
+          float ccx = (float)W * 0.5f - 0.5f;
+          float ddx = (float)x - ccx, ddy = (float)y - ccx;
+          base = std::sqrt(ddx * ddx + ddy * ddy);
+          ang = std::atan2(ddy, ddx);
+        } else {
+          float wx2 = (w.wind.dx == 0 && w.wind.dy == 0) ? 0.8f : (float)w.wind.dx;
+          float wy2 = (w.wind.dx == 0 && w.wind.dy == 0) ? 0.5f : (float)w.wind.dy;
+          base = (float)x * wx2 + (float)y * wy2;
+          ang = 0.13f * (float)x - 0.11f * (float)y;
+        }
+        float s1 = std::sin(0.42f * base + animT * 1.9f +
+                            1.3f * std::sin(ang * 3.f + animT * 0.20f));
+        float s2 = std::sin(0.23f * base + animT * 1.15f +
+                            1.7f * std::sin(ang * 5.f - animT * 0.13f));
+        float s3 = std::sin(0.70f * base + animT * 2.6f + (float)(h & 7u) * 0.22f);
+        float grp = 0.6f + 0.4f * std::sin(0.06f * base + animT * 0.45f +
+                                           0.8f * std::sin(ang * 2.f));
+        float swell = (0.55f * s1 + 0.30f * s2 + 0.15f * s3) * grp;
+        float crest = swell * std::fabs(swell);  // sharpen up, soften down
+        int lift = (int)(crest * 15.f);
+        r += lift / 2; g += lift; b += (int)(lift * 1.1f);
+        if (crest > 0.60f) {  // whitecaps on the strongest sets
+          float f = (crest - 0.60f) / 0.40f * 0.55f;
+          r = (int)(r + (205 - r) * f);
+          g = (int)(g + (222 - g) * f);
+          b = (int)(b + (238 - b) * f);
+        }
       } else if (!stillBiome) {
         // Shallows: contour surf — crests follow the rising seabed toward
         // shore (Surf Sandbox), with a soft crossing wind swell.
