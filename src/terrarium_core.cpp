@@ -618,8 +618,11 @@ static void spawnRainbow(World& w, Rng& r) {
 
 static void applyRainOverlay(World& w, int tick) {
   if (w.weather.rainStrength <= 0.01f) return;
-  int strength = (int)(w.weather.rainStrength * 10.f);
-  int drops = (W * H) / std::max(8, 30 - strength*2);
+  // Quadratic in strength: a shower rolling in starts as a few scattered
+  // drops and thickens, instead of arriving as a wall of streaks.
+  float rs = w.weather.rainStrength;
+  int drops = (int)((float)(W * H) * rs * rs / 12.0f);
+  if (drops < 1) return;
 
   char streak = '|';
   if (w.wind.strength > 0) {
@@ -666,8 +669,8 @@ static void updateWeather(World& w, Rng& r, int tick) {
   // Biome-driven precipitation tendencies (higher => more rain; lower => drier).
   auto biomeRaininess = [&](Biome b)->float{
     switch (b) {
-      case WETLAND:  return 1.55f;
-      case TROPICAL: return 1.35f;
+      case WETLAND:  return 1.15f;
+      case TROPICAL: return 1.10f;
       case MEADOW:   return 0.45f;
       case ALPINE:   return 0.22f;
       case ALIEN:    return 0.95f;
@@ -688,9 +691,9 @@ static void updateWeather(World& w, Rng& r, int tick) {
 
   switch (w.weather.state) {
     case CLEAR: {
-      w.weather.rainStrength = std::max(0.f, w.weather.rainStrength - 0.02f);
-      if (cloudy && r.oneIn(6)) toState(OVERCAST);
-      int chance = (s==SUMMER? 220 : s==SPRING? 170 : s==AUTUMN? 190 : 260);
+      w.weather.rainStrength = std::max(0.f, w.weather.rainStrength - 0.008f);
+      if (cloudy && r.oneIn(9)) toState(OVERCAST);
+      int chance = (s==SUMMER? 300 : s==SPRING? 240 : s==AUTUMN? 260 : 340);
       // Apply biome raininess: lower raininess => higher chance value (rarer transitions)
       chance = (int)std::clamp((float)chance / std::max(0.05f, raininess), 80.0f, 12000.0f);
       if (w.biome==TROPICAL) chance = std::max(120, chance-60);
@@ -700,27 +703,31 @@ static void updateWeather(World& w, Rng& r, int tick) {
     } break;
 
     case OVERCAST: {
-      w.weather.rainStrength = std::min(0.35f, w.weather.rainStrength + 0.01f);
-      if (veryCloudy && w.weather.timer > 80 && r.oneIn(3)) toState(RAIN);
-      if (!cloudy && w.weather.timer > 120 && r.oneIn(4)) toState(CLEAR);
-      if (w.weather.timer > 600 && r.oneIn(3)) toState(CLEAR);
+      // Overcast is grey sky, not drizzle: rain fades out here rather than
+      // pre-loading to 0.35 (which made every shower arrive full-strength
+      // and left permanent background rain — the "binary and heavy" feel).
+      w.weather.rainStrength = std::max(0.f, w.weather.rainStrength - 0.006f);
+      if (veryCloudy && w.weather.timer > 110 && r.oneIn(4)) toState(RAIN);
+      if (!cloudy && w.weather.timer > 110 && r.oneIn(3)) toState(CLEAR);
+      if (w.weather.timer > 500 && r.oneIn(3)) toState(CLEAR);
     } break;
 
     case RAIN: {
+      // Roll in gently: ~2 minutes from first drops to full rain.
       float maxRain = (w.biome==ALPINE? 0.50f : (w.biome==MEADOW? 0.55f : (w.biome==DESERT? 0.18f : 1.0f)));
-      w.weather.rainStrength = std::min(maxRain, w.weather.rainStrength + 0.02f);
+      w.weather.rainStrength = std::min(maxRain, w.weather.rainStrength + 0.0025f);
       int stormChance = (s==SUMMER ? 180 : 420);
       stormChance = (int)std::clamp((float)stormChance / std::max(0.05f, raininess), 90.0f, 25000.0f);
       if (w.biome==TROPICAL) stormChance = std::max(120, stormChance-80);
       if (w.biome==DESERT) stormChance = std::max(8000, stormChance+6000); // basically no storms
       if (w.weather.timer > 120 && r.oneIn(stormChance)) toState(STORM);
-      if (w.weather.timer > 350 && r.oneIn(6)) toState(OVERCAST);
-      if (w.weather.timer > 900) toState(OVERCAST);
+      if (w.weather.timer > 260 && r.oneIn(5)) toState(OVERCAST);
+      if (w.weather.timer > 700) toState(OVERCAST);
     } break;
 
     case STORM: {
       float maxRain = (w.biome==ALPINE? 0.60f : (w.biome==MEADOW? 0.65f : (w.biome==DESERT? 0.22f : 1.0f)));
-      w.weather.rainStrength = std::min(maxRain, w.weather.rainStrength + 0.03f);
+      w.weather.rainStrength = std::min(maxRain, w.weather.rainStrength + 0.008f);
       if (w.weather.timer > 160 && r.oneIn(4)) toState(RAIN);
       if (w.weather.timer > 420) toState(RAIN);
     } break;

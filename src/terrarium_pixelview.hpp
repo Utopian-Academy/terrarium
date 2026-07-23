@@ -23,14 +23,17 @@ inline uint8_t pixelviewCloudAt(const World& w, int x, int y) {
   return (uint8_t)std::min<int>(255, (int)(c * w.cloudOpacity));
 }
 
-// Shaded per-cell color: entities, overlays, water, terrain, then cloud
-// shadow and the day/night cycle.
+// Shaded per-cell color: entities, overlays, water, terrain, then season,
+// cloud shadow, lightning, and the day/night cycle.
 inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick) {
   // Small stable per-cell jitter so flat areas read as texture, not banding.
   uint32_t h = hash3((uint32_t)x, (uint32_t)y, w.worldSeed);
   int j = (int)(h & 15u) - 8;
+  Season season = seasonAt(tick);
+  bool snowy = (season == WINTER && w.biome != TROPICAL && w.biome != DESERT);
 
   int r = 0, g = 0, b = 0;
+  bool tintable = false;  // terrain cells take the season grade
 
   char e = w.entities[y][x];
   char o = w.overlay[y][x];
@@ -41,9 +44,19 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick) {
     // Agents: warm bright dots so they pop at one pixel.
     r = 255; g = 230; b = 160;
   } else if (o == '|' || o == '/' || o == '\\') {
-    r = 150; g = 190; b = 235;  // rain streak
+    if (snowy) { r = 238; g = 242; b = 250; }  // winter rain falls as snow
+    else       { r = 150; g = 190; b = 235; }  // rain streak
+  } else if (o == '=' || o == '-' || o == '~' || o == '+' || o == '!') {
+    // Rainbow bands, in actual rainbow order (was hashed confetti).
+    switch (o) {
+      case '=': r = 235; g = 70;  b = 60;  break;  // red
+      case '-': r = 255; g = 150; b = 45;  break;  // orange
+      case '~': r = 255; g = 220; b = 70;  break;  // yellow
+      case '+': r = 95;  g = 205; b = 95;  break;  // green
+      default:  r = 150; g = 110; b = 235; break;  // violet
+    }
   } else if (o != ' ') {
-    // Rainbow / chaos overlays: hue from the glyph itself.
+    // Chaos overlays: hue from the glyph itself.
     uint32_t oh = hash3((uint32_t)o, 7u, 77u);
     r = 140 + (int)(oh & 0x7F); g = 140 + (int)((oh >> 7) & 0x7F);
     b = 140 + (int)((oh >> 14) & 0x7F);
@@ -55,6 +68,7 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick) {
     // sparse foam shimmer
     if (((h >> 4) + (uint32_t)(tick / 6)) % 97u == 0u) { r = g = b = 235; }
   } else {
+    tintable = true;
     switch (t) {
       case ',': r = 60 + j; g = 140 + j; b = 70; break;
       case '"': r = 48 + j; g = 126 + j; b = 62; break;
@@ -93,6 +107,20 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick) {
     if (t == KELP_GLYPH) { r = 24; g = 140 + j; b = 110; }
   }
 
+  // Season grade on terrain: autumn browns the foliage, spring vivifies,
+  // winter cools — plus a frost/snow dusting on open ground in winter.
+  if (tintable) {
+    if (season == AUTUMN) { r += 14; g -= 6; }
+    else if (season == SPRING) { g += 8; }
+    else if (snowy) {
+      r = (int)(r * 0.90f) + 14; g = (int)(g * 0.92f) + 12; b += 22;
+      // Sparse snow cover that thickens through the season.
+      uint32_t sh = hash3((uint32_t)x, (uint32_t)y, 0x534E4F57u);
+      float cover = 0.20f + 0.35f * seasonLerp(tick);
+      if ((float)(sh & 1023u) / 1023.0f < cover) { r = 226; g = 232; b = 244; }
+    }
+  }
+
   // Cloud shadow + smooth day/night cycle (dawn gold, dusk amber, cool
   // moonlit nights — never a hard brightness step).
   float shade = 1.0f - (pixelviewCloudAt(w, x, y) / 255.0f) * 0.35f;
@@ -101,5 +129,11 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick) {
   float rr = (float)r * bright * (1.f + 0.20f * dl.warm);
   float gg = (float)g * bright * (1.f + 0.04f * (dl.warm > 0.f ? dl.warm : 0.f));
   float bb = (float)b * bright * (1.f - 0.18f * dl.warm);
+
+  // Storm lightning: single-tick global flashes (the sim's strikes were
+  // invisible at 1px/cell — the whole sky flickering sells the storm).
+  if (w.weather.state == STORM && (hash3((uint32_t)tick, 99u, 7u) % 19u) == 0u) {
+    rr = rr * 1.5f + 70.f; gg = gg * 1.5f + 70.f; bb = bb * 1.4f + 60.f;
+  }
   return PixelviewRGB{clampU8((int)rr), clampU8((int)gg), clampU8((int)bb)};
 }
