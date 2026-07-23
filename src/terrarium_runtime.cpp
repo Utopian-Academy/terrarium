@@ -136,6 +136,8 @@ CliOptions parseCliOptions(int argc, char** argv) {
       g_daynightMode = (std::strcmp(m, "clock") == 0) ? 2
                        : (std::strcmp(m, "off") == 0) ? 0
                                                       : 1;
+    } else if (std::strcmp(argv[i], "--weather") == 0 && i + 1 < argc) {
+      g_weatherMode = (std::strcmp(argv[++i], "live") == 0) ? 1 : 0;
     } else if (std::strcmp(argv[i], "--seasons") == 0 && i + 1 < argc) {
       const char* m = argv[++i];
       g_seasonMode = (std::strcmp(m, "daily") == 0) ? 1

@@ -54,7 +54,9 @@ inline float pixelviewSwell(const World& w, int x, int y, float animT,
   float grp = 0.6f + 0.4f * std::sin(0.06f * base + animT * 0.45f +
                                      0.8f * std::sin(ang * 2.f));
   if (grpOut) *grpOut = grp;
-  return (0.55f * s1 + 0.30f * s2 + 0.15f * s3) * grp;
+  // Wave energy follows the wind (live mode: the real wind).
+  float energy = 0.70f + 0.10f * (float)w.wind.strength;
+  return (0.55f * s1 + 0.30f * s2 + 0.15f * s3) * grp * energy;
 }
 
 // Island cast (ship, seabirds, whale): positions computed once per frame.
@@ -152,7 +154,9 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
   uint32_t h = hash3((uint32_t)x, (uint32_t)y, w.worldSeed);
   int j = (int)(h & 15u) - 8;
   Season season = seasonAt(tick);
-  bool snowy = (season == WINTER && w.biome != TROPICAL && w.biome != DESERT);
+  bool liveSnow = (g_weatherMode == 1 && liveWeatherNow().snowing);
+  bool snowy = liveSnow ||
+               (season == WINTER && w.biome != TROPICAL && w.biome != DESERT);
 
   int r = 0, g = 0, b = 0;
   bool tintable = false;  // terrain cells take the season grade
@@ -532,6 +536,49 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
         uint32_t dh = hash3((uint32_t)x, (uint32_t)y, 0xD2A60Fu ^ w.worldSeed);
         float p = pixelviewMote(dh, animT, 3.0f, 2400u, 5.0f) * br;
         rr += 60.f * p; gg += 205.f * p; bb += 195.f * p;
+      }
+    }
+    if (w.biome == DESERT && d == 0) {
+      // Tumbleweed: rolls with the wind, bouncing, one crossing at a time.
+      float twSpan = (float)W * 1.4f;
+      uint32_t twe = (uint32_t)(animT / 45.f);
+      uint32_t twh = hash3(twe, 0x70B1Eu, w.worldSeed);
+      float age = animT - (float)twe * 45.f;
+      if ((twh % 2u) == 0u && age < 34.f) {
+        float wx3 = (w.wind.dx == 0 && w.wind.dy == 0) ? 1.f : (float)w.wind.dx;
+        float wy3 = (float)w.wind.dy * 0.4f;
+        float n = std::sqrt(wx3 * wx3 + wy3 * wy3);
+        float sx0 = ((twh >> 8) & 1023u) / 1023.f * (float)W;
+        float sy0 = ((twh >> 18) & 1023u) / 1023.f * (float)H;
+        float px2 = sx0 + wx3 / n * (age * twSpan / 34.f - twSpan * 0.5f);
+        float py2 = sy0 + wy3 / n * (age * twSpan / 34.f - twSpan * 0.5f) -
+                    2.2f * std::fabs(std::sin(age * 2.2f));
+        px2 = px2 - std::floor(px2 / (float)W) * (float)W;  // wrap
+        float ddx2 = (float)x - px2;
+        if (ddx2 > (float)W * 0.5f) ddx2 -= (float)W;
+        if (ddx2 < -(float)W * 0.5f) ddx2 += (float)W;
+        float ddy2 = (float)y - py2;
+        if (ddx2 * ddx2 + ddy2 * ddy2 < 1.2f) {
+          rr = 185.f * br; gg = 155.f * br; bb = 105.f * br;
+        }
+      }
+      // Dust devil: occasional wandering spiral of lifted sand.
+      uint32_t dde = (uint32_t)(animT / 90.f);
+      uint32_t ddh = hash3(dde, 0xD05Eu, w.worldSeed);
+      float dage = animT - (float)dde * 90.f;
+      if ((ddh % 3u) == 0u && dage < 20.f) {
+        float dxc = ((ddh >> 6) & 1023u) / 1023.f * (float)W * 0.7f + (float)W * 0.15f +
+                    6.f * std::sin(dage * 0.7f);
+        float dyc = ((ddh >> 16) & 1023u) / 1023.f * (float)H * 0.7f + (float)H * 0.15f +
+                    6.f * std::cos(dage * 0.5f);
+        float ex = (float)x - dxc, ey = (float)y - dyc;
+        float dist2 = ex * ex + ey * ey;
+        if (dist2 < 6.5f) {
+          float swirl = std::sin(std::atan2(ey, ex) * 3.f + animT * 8.f -
+                                 std::sqrt(dist2) * 1.8f);
+          float f = (1.f - dist2 / 6.5f) * (0.5f + 0.5f * swirl) * 0.5f * br;
+          rr += 120.f * f; gg += 105.f * f; bb += 75.f * f;
+        }
       }
     }
     if (w.biome == DESERT && dl.level > 0.95f) {

@@ -152,6 +152,37 @@ int displayBgMode() {
   return cached;
 }
 
+int g_weatherMode = 0;
+
+const LiveWeather& liveWeatherNow() {
+  static LiveWeather cached;
+  static std::chrono::steady_clock::time_point lastRead{};
+  auto now = std::chrono::steady_clock::now();
+  if (now - lastRead < std::chrono::seconds(60)) return cached;
+  lastRead = now;
+  const char* home = std::getenv("HOME");
+  if (!home) return cached;
+  std::string path = std::string(home) + "/.terrarium-weather";
+  FILE* f = std::fopen(path.c_str(), "r");
+  if (!f) { cached.valid = false; return cached; }
+  LiveWeather lw;
+  char key[32]; float val;
+  while (std::fscanf(f, "%31[^=]=%f\n", key, &val) == 2) {
+    if (!std::strcmp(key, "code")) lw.code = (int)val;
+    else if (!std::strcmp(key, "cloud")) lw.cloud = (int)val;
+    else if (!std::strcmp(key, "windspeed")) lw.windspeed = val;
+    else if (!std::strcmp(key, "winddir")) lw.winddir = (int)val;
+    else if (!std::strcmp(key, "temp")) lw.temp = val;
+    else if (!std::strcmp(key, "ts")) lw.ts = (long)val;
+  }
+  std::fclose(f);
+  // Stale data (fetcher dead / offline > 2h) falls back to simulated.
+  lw.valid = (std::time(nullptr) - lw.ts) < 7200;
+  lw.snowing = (lw.code >= 71 && lw.code <= 77) || lw.code == 85 || lw.code == 86;
+  cached = lw;
+  return cached;
+}
+
 float displayContrast() {
   static float cached = 1.0f;
   static std::chrono::steady_clock::time_point lastRead{};
@@ -717,6 +748,22 @@ static void applyRainOverlay(World& w, int tick) {
 static void updateWind(World& w, Rng& r, int tick) {
   if (tick % WIND_CHANGE_TICKS != 0) return;
 
+  // Live mode: real wind speed and compass direction drive the vat's wind
+  // (and through it the ocean current, cloud drift, and fire spread).
+  if (g_weatherMode == 1) {
+    const LiveWeather& lw = liveWeatherNow();
+    if (lw.valid) {
+      w.wind.strength = std::clamp((int)(lw.windspeed / 8.f), 0, MAX_WIND);
+      // Meteorological direction = where wind comes FROM; blow-to = +180.
+      float th = ((float)lw.winddir + 180.f) * 3.14159f / 180.f;
+      float bx = std::sin(th), by = -std::cos(th);  // N = screen up
+      w.wind.dx = (bx > 0.38f) ? 1 : (bx < -0.38f ? -1 : 0);
+      w.wind.dy = (by > 0.38f) ? 1 : (by < -0.38f ? -1 : 0);
+      if (w.wind.strength == 0) { w.wind.dx = 0; w.wind.dy = 0; }
+      return;
+    }
+  }
+
   int target = 0;
   if (w.weather.state == CLEAR) target = r.i(0, 2);
   if (w.weather.state == OVERCAST) target = r.i(1, 3);
@@ -740,6 +787,31 @@ static void updateWind(World& w, Rng& r, int tick) {
 
 static void updateWeather(World& w, Rng& r, int tick) {
   w.weather.timer++;
+
+  // Live mode: the real sky decides. WMO weather codes -> vat states,
+  // rain strength eases toward its target so showers still roll in/out.
+  if (g_weatherMode == 1) {
+    const LiveWeather& lw = liveWeatherNow();
+    if (lw.valid) {
+      WeatherState target = CLEAR;
+      float rainT = 0.f;
+      int c = lw.code;
+      if (c >= 95) { target = STORM; rainT = 0.85f; }
+      else if ((c >= 63 && c <= 67) || c == 81 || c == 82) { target = RAIN; rainT = 0.70f; }
+      else if ((c >= 51 && c <= 61) || c == 80) { target = RAIN; rainT = 0.35f; }
+      else if (lw.snowing) { target = RAIN; rainT = 0.45f; }  // rendered as snow
+      else if (c >= 2 || lw.cloud > 60) target = OVERCAST;
+      if (w.weather.state != target) { w.weather.state = target; w.weather.timer = 0; }
+      float rs = w.weather.rainStrength;
+      w.weather.rainStrength = rs + (rainT - rs) * 0.01f;
+      w.cloudOpacity = 0.25f + 0.75f * (float)lw.cloud / 100.f;
+      bool isRainingNow = (target == RAIN || target == STORM);
+      if (w.weather.lastTickWasRaining && !isRainingNow && r.oneIn(3)) spawnRainbow(w, r);
+      w.weather.lastTickWasRaining = isRainingNow;
+      return;
+    }
+  }
+
   Season s = seasonAt(tick);
 
   // Biome-driven precipitation tendencies (higher => more rain; lower => drier).
@@ -1668,6 +1740,10 @@ static void stepTerrain(World& w, Rng& r, Season s, int tick) {
     }
 
     if (c==',') {
+      // Desert superbloom: after real rain (live weather) soaks the ground,
+      // the desert flowers — and fades again as the moisture decays.
+      if (w.biome==DESERT && w.moist[y][x] > 110 && r.oneIn(400))
+        next[y][x] = (r.oneIn(4) ? '&' : 'f');
       if ((g+tg)>=4 && r.oneIn((int)(90*winterSlow))) next[y][x]='"';
       float flowerScale = (alt > 200) ? 0.35f : 1.0f;
       if (wet>0 && r.u01() < (0.005f * springBoost * rainBoost * w.bw.bloomRate * flowerScale)) {

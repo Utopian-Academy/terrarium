@@ -68,6 +68,8 @@ PicoOptions parseArgs(int argc, char** argv) {
       o.circle = true;
     } else if (a == "--island") {
       o.island = true;
+    } else if (a == "--weather") {
+      g_weatherMode = (next() == std::string("live")) ? 1 : 0;
     } else if (a == "--daynight") {
       std::string m = next();
       g_daynightMode = (m == "clock") ? 2 : (m == "off") ? 0 : 1;

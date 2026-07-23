@@ -459,6 +459,19 @@ int displayBgMode();
 // Display contrast 0.5..1.8 around mid-grey, live via ~/.terrarium-contrast
 // (same polling pattern as brightness). Missing file = 1.0.
 float displayContrast();
+
+// Live weather: mirror the real local sky. A fetcher writes
+// ~/.terrarium-weather (Open-Meteo, every 10 min); the sim polls it and
+// overrides the weather state machine when g_weatherMode == 1.
+extern int g_weatherMode;  // 0 = simulated weather, 1 = live local weather
+struct LiveWeather {
+  bool valid = false;
+  bool snowing = false;
+  int code = 0, cloud = 0, winddir = 0;
+  float windspeed = 0.f, temp = 0.f;
+  long ts = 0;
+};
+const LiveWeather& liveWeatherNow();
 const char* weatherName(WeatherState state);
 const char* seasonName(Season season);
 const char* speciesName(uint8_t s);
