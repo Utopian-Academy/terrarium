@@ -23,6 +23,7 @@ struct RenderPassState {
 void renderWorldPass(SDL_Renderer* renderer, const Layout& layout, World& world,
                      GlyphCache& worldGlyphs, int tick,
                      const RenderPassState& frame) {
+  const Daylight daylight = daylightNow(tick);
   for (int y = 0; y < frame.viewH; ++y) {
     int worldY = g_camY + y;
     int y0 = (y * layout.simHpx) / frame.viewH;
@@ -41,6 +42,7 @@ void renderWorldPass(SDL_Renderer* renderer, const Layout& layout, World& world,
                          frame.seasonBlend);
       uint8_t cloud = adjustedCloudCoverage(world, worldX, worldY);
       applyCloudShadow(bg, cloud);
+      applyDaylight(bg, daylight);
 
       setColor(renderer, bg.r, bg.g, bg.b);
       SDL_RenderFillRect(renderer, &cellRect);
@@ -65,6 +67,7 @@ void renderWorldPass(SDL_Renderer* renderer, const Layout& layout, World& world,
       if (texture) {
         RGB fg = fgForChar(world, glyph, frame.season, frame.seasonBlend, tick,
                            x, y);
+        applyDaylight(fg, daylight);
 
         if ((world.terrain[worldY][worldX] == ',' ||
              world.terrain[worldY][worldX] == '"') &&

@@ -22,6 +22,9 @@ RGB baseBgFor(const World& world, int x, int y, int tick, Season season,
 RGB fgForChar(const World& world, char glyph, Season season, float seasonBlend,
               int tick, int x, int y);
 void applyCloudShadow(RGB& bg, uint8_t cloudVal);
+// Day/night grade: brightness from d.level (floor 0.38 — moonlit, not
+// black), warm/cool tint from d.warm. Smooth by construction.
+void applyDaylight(RGB& color, const Daylight& d);
 void applyCloudLayer(SDL_Renderer* renderer, const SDL_Rect& rect,
                      uint8_t cloudVal);
 void drawString(SDL_Renderer* renderer, GlyphCache& glyphCache, int x, int y,

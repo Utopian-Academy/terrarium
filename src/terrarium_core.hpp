@@ -417,6 +417,23 @@ void updateModPool(World& w, int tick, int viewW, int viewH);
 Season seasonAt(int tick);
 float seasonLerp(int tick);
 bool nightish(int tick);
+
+// Day/night cycle. `level` is daylight 0..1 (smoothstep dawn/dusk ramps,
+// never a hard flip); `warm` tints the light: +1 = golden hour, 0 = neutral
+// noon, negative = cool moonlight.
+struct Daylight {
+  float level = 1.0f;
+  float warm = 0.0f;
+};
+// 0 = off (always noon), 1 = sim ticks (one day = 8*DAY_TICKS),
+// 2 = wall clock (the vat lives in your timezone).
+extern int g_daynightMode;
+Daylight daylightNow(int tick);
+
+// Display brightness 0.05..1.0, live-controlled by the kiosk remote: reads
+// ~/.terrarium-brightness (single float) at most once a second. Missing
+// file = 1.0. Renderer-only — never affects the sim.
+float displayBrightness();
 const char* weatherName(WeatherState state);
 const char* seasonName(Season season);
 const char* speciesName(uint8_t s);

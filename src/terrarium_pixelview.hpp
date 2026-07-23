@@ -93,9 +93,13 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick) {
     if (t == KELP_GLYPH) { r = 24; g = 140 + j; b = 110; }
   }
 
-  // Cloud shadow + gentle day/night cycle.
+  // Cloud shadow + smooth day/night cycle (dawn gold, dusk amber, cool
+  // moonlit nights — never a hard brightness step).
   float shade = 1.0f - (pixelviewCloudAt(w, x, y) / 255.0f) * 0.35f;
-  if (nightish(tick)) shade *= 0.55f;
-  return PixelviewRGB{clampU8((int)(r * shade)), clampU8((int)(g * shade)),
-                      clampU8((int)(b * shade))};
+  Daylight dl = daylightNow(tick);
+  float bright = shade * (0.38f + 0.62f * dl.level) * displayBrightness();
+  float rr = (float)r * bright * (1.f + 0.20f * dl.warm);
+  float gg = (float)g * bright * (1.f + 0.04f * (dl.warm > 0.f ? dl.warm : 0.f));
+  float bb = (float)b * bright * (1.f - 0.18f * dl.warm);
+  return PixelviewRGB{clampU8((int)rr), clampU8((int)gg), clampU8((int)bb)};
 }

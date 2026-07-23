@@ -62,6 +62,9 @@ PicoOptions parseArgs(int argc, char** argv) {
       o.seed = (uint32_t)std::strtoul(next(), nullptr, 0);
     } else if (a == "--fullscreen") {
       o.fullscreen = true;
+    } else if (a == "--daynight") {
+      std::string m = next();
+      g_daynightMode = (m == "clock") ? 2 : (m == "off") ? 0 : 1;
     }
   }
   return o;

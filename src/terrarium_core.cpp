@@ -1,5 +1,7 @@
 #include "terrarium_core.hpp"
 
+#include <ctime>
+
 static inline float smooth1(float cur,float tgt,float s){
   float a=std::clamp(s,0.0f,0.98f);
   return cur*a + tgt*(1.0f-a);
@@ -47,7 +49,71 @@ static int countNeighborsWater(const Water& w, int x, int y) {
 
 Season seasonAt(int tick) { return (Season)((tick / SEASON_TICKS) % 4); }
 float seasonLerp(int tick) { return float(tick % SEASON_TICKS) / float(SEASON_TICKS); }
-bool nightish(int tick) { return ((tick / (DAY_TICKS/2)) % 2) == 1; }
+bool nightish(int tick) { return daylightNow(tick).level < 0.35f; }
+
+int g_daynightMode = 1;
+
+Daylight daylightNow(int tick) {
+  float hour;
+  if (g_daynightMode == 2) {
+    std::time_t now = std::time(nullptr);
+    std::tm lt{};
+#ifdef _WIN32
+    localtime_s(&lt, &now);
+#else
+    localtime_r(&now, &lt);
+#endif
+    hour = (float)lt.tm_hour + (float)lt.tm_min / 60.0f;
+  } else if (g_daynightMode == 1) {
+    // One full day = 8*DAY_TICKS (24 minutes at 5 tps). Start mid-morning
+    // so a fresh vat opens in daylight.
+    const int cycle = DAY_TICKS * 8;
+    hour = 9.0f + 24.0f * (float)(tick % cycle) / (float)cycle;
+    if (hour >= 24.0f) hour -= 24.0f;
+  } else {
+    return {1.0f, 0.0f};
+  }
+
+  auto smooth = [](float x) {
+    x = x < 0.f ? 0.f : (x > 1.f ? 1.f : x);
+    return x * x * (3.f - 2.f * x);
+  };
+
+  Daylight d;
+  if (hour < 5.f)        d.level = 0.f;
+  else if (hour < 8.f)   d.level = smooth((hour - 5.f) / 3.f);   // dawn
+  else if (hour < 18.f)  d.level = 1.f;
+  else if (hour < 22.f)  d.level = 1.f - smooth((hour - 18.f) / 4.f);  // dusk
+  else                   d.level = 0.f;
+
+  if (hour >= 5.f && hour < 8.5f)
+    d.warm = 0.8f * (1.f - std::fabs((hour - 6.75f) / 1.75f));   // sunrise gold
+  else if (hour >= 17.5f && hour < 22.f)
+    d.warm = 1.0f * (1.f - std::fabs((hour - 19.75f) / 2.25f));  // sunset amber
+  else if (d.level <= 0.f)
+    d.warm = -0.6f;                                              // moonlight
+  return d;
+}
+
+float displayBrightness() {
+  static float cached = 1.0f;
+  static std::chrono::steady_clock::time_point lastRead{};
+  auto now = std::chrono::steady_clock::now();
+  if (now - lastRead < std::chrono::seconds(1)) return cached;
+  lastRead = now;
+  const char* home = std::getenv("HOME");
+  if (!home) return cached;
+  std::string path = std::string(home) + "/.terrarium-brightness";
+  if (FILE* f = std::fopen(path.c_str(), "r")) {
+    float v = 1.0f;
+    if (std::fscanf(f, "%f", &v) == 1)
+      cached = std::clamp(v, 0.05f, 1.0f);
+    std::fclose(f);
+  } else {
+    cached = 1.0f;
+  }
+  return cached;
+}
 
 const char* weatherName(WeatherState state) {
   switch (state) {
@@ -1862,6 +1928,22 @@ static void stepEntities(World& w, Rng& r, int tick) {
 // Movement: very simple, but driven by needs and panic.
       int ox=a.x, oy=a.y;
       int nx=a.x, ny=a.y;
+
+      // Night: calm creatures mostly sleep (rest recovers fatigue); anyone
+      // fleeing, starving or parched still moves. Daylight ramps back in
+      // smoothly, so activity fades rather than switching.
+      {
+        float dl = daylightNow(tick).level;
+        bool urgent = (a.flags & 1) || a.hunger > 0.75f || a.thirst > 0.75f;
+        if (!urgent && dl < 0.6f) {
+          float restChance = (0.6f - dl) / 0.6f * 0.75f;  // up to 75% at full dark
+          if (r.u01() < restChance) {
+            a.intent = INTENT_WANDER;
+            a.fatigue = clamp01(a.fatigue - 0.05f * dt);
+            continue;
+          }
+        }
+      }
 
       if (a.flags & 1) {
         a.intent = INTENT_FLEE;

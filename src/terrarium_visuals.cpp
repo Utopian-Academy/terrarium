@@ -716,6 +716,17 @@ RGB fgForChar(const World& world, char c, Season season, float seasonBlend,
   return fg;
 }
 
+void applyDaylight(RGB& color, const Daylight& d) {
+  float bright = (0.38f + 0.62f * d.level) * displayBrightness();
+  float w = d.warm;
+  float rMul = bright * (1.f + 0.20f * w);
+  float gMul = bright * (1.f + 0.04f * std::max(0.f, w));
+  float bMul = bright * (1.f - 0.18f * w);
+  color.r = clampU8((int)(color.r * rMul));
+  color.g = clampU8((int)(color.g * gMul));
+  color.b = clampU8((int)(color.b * bMul));
+}
+
 void applyCloudShadow(RGB& bg, uint8_t cloudVal) {
   float cloud = cloudVal / 255.0f;
   float shadow = 1.0f - cloud * 0.42f;
