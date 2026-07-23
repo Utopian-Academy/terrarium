@@ -186,7 +186,7 @@ void stepSimulationOnce(World& world, Rng& r, std::string& banner, int& tick,
                         int& heldNote3, int rootKey, ScaleType scaleType,
                         const std::vector<MidiParam>& params) {
   step(world, r, banner, tick);
-  tick++;
+  tick = wrapTick(tick + 1);
   synthTickMusic(synth, world, r, tick, heldNote, heldNote2, heldNote3,
                  rootKey, scaleType, params);
   // synthTickMusic consumes step events only when the synth is enabled and it

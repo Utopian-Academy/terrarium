@@ -1057,12 +1057,39 @@ for (int y=0;y<H;++y) for (int x=0;x<W;++x) {
 }
 
 // ---------------- Water flow ----------------
+// How much of the world is underwater right now (0..1).
+static float wetFraction(const World& w) {
+  int wet = 0;
+  for (int y=0;y<H;++y) for (int x=0;x<W;++x) if (w.water[y][x] > 0) ++wet;
+  return (float)wet / (float)(W*H);
+}
+
+// The wet fraction each biome should settle around. A kiosk vat runs for
+// days: without a target, any tiny source/sink imbalance eventually turns
+// the whole world to ocean (or desert).
+static float biomeWetTarget(Biome b) {
+  switch (b) {
+    case WETLAND:  return 0.45f;
+    case TROPICAL: return 0.30f;
+    case ALIEN:    return 0.28f;
+    case DESERT:   return 0.08f;
+    case ALPINE:   return 0.18f;
+    default:       return 0.22f;  // meadow
+  }
+}
+
 static void stepWater(World& w, Rng& r) {
   Water next = w.water;
+
+  // Homeostat, source side: springs throttle as the world exceeds its
+  // biome's wet target (sinks strengthen in waterSinks — the two together
+  // guarantee an equilibrium instead of hoping the tuning balances).
+  const float wetOver = wetFraction(w) - biomeWetTarget(w.biome);
 
   // Persistent springs: keep rivers/lakes alive long-term.
   if (!w.springs.empty()) {
     for (auto &p : w.springs) {
+      if (wetOver > 0.f && r.u01() < std::min(0.95f, wetOver * 6.f)) continue;
       int sx=p.first, sy=p.second;
       int add = 2;
       if (w.biome==DESERT) add = 1;
@@ -1196,6 +1223,18 @@ static void waterSinks(World& w, Rng& r, Season s) {
   if (w.biome == WETLAND) edgeDrain *= 0.60f;
   if (w.biome == TROPICAL) edgeDrain *= 0.70f;
 
+  // Homeostat, sink side (see stepWater): the wetter the world is beyond
+  // its biome's target, the harder evaporation/infiltration/drainage pull.
+  {
+    float over = wetFraction(w) - biomeWetTarget(w.biome);
+    if (over > 0.f) {
+      float boost = 1.0f + 14.0f * over;
+      evap *= boost;
+      infil *= boost;
+      edgeDrain *= boost;
+    }
+  }
+
   for (int y=0; y<H; ++y) for (int x=0; x<W; ++x) {
     uint8_t &d = w.water[y][x];
     if (d == 0) continue;
@@ -1271,6 +1310,10 @@ static void stepTerrain(World& w, Rng& r, Season s, int tick) {
     if (w.water[y][x] > 0) {
       if (w.terrain[y][x] == '*') next[y][x] = 'x';
 
+      // Kelp dies back rarely so beds stay sparse instead of carpeting the
+      // whole lake over kiosk timescales (it had no removal path at all).
+      if (w.terrain[y][x] == KELP_GLYPH && r.oneIn(700)) next[y][x] = '.';
+
       // Underwater flora (fish cover): very sparse kelp in shallow water, wind+rain help it.
       if (w.water[y][x] <= 2 && (w.terrain[y][x]=='.' || w.terrain[y][x]==',' || w.terrain[y][x]==';')) {
         int boost = (w.biome==WETLAND || w.biome==TROPICAL) ? 1 : 0;
@@ -1283,6 +1326,12 @@ static void stepTerrain(World& w, Rng& r, Season s, int tick) {
     }
 
     char c = w.terrain[y][x];
+
+    // Beached kelp (water receded) dries out quickly.
+    if (c == KELP_GLYPH) {
+      if (r.oneIn(12)) next[y][x] = (r.oneIn(2) ? ',' : '.');
+      continue;
+    }
 
     // altitude drives ecology (mountains sparser, valleys richer)
     uint8_t alt = w.height[y][x];
@@ -2034,6 +2083,20 @@ static void stepEntities(World& w, Rng& r, int tick) {
 
 // big ancient tree anchors 'Q'
 static void maybeSpawnAncientTree(World& w, Rng& r) {
+  // Ancient trees were immortal — over kiosk timescales they slowly filled
+  // the world. Cap the population and let each one very rarely fall,
+  // leaving a mushroom ring on the forest floor.
+  int count = 0;
+  for (int y=0;y<H;++y) for (int x=0;x<W;++x) {
+    if (w.entities[y][x] != 'Q') continue;
+    ++count;
+    if (r.oneIn(30000)) {
+      w.entities[y][x] = ' ';
+      w.terrain[y][x] = 'm';
+      --count;
+    }
+  }
+  if (count >= std::max(2, (W*H)/900)) return;
   if (!r.oneIn(2200)) return;
   for (int tries=0; tries<500; ++tries) {
     int x=r.i(1, W-2), y=r.i(1, H-2);

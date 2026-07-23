@@ -277,7 +277,7 @@ private:
 
   void doTick(uint32_t frameOffset) {
     step(world_, rng_, banner_, tick_);
-    ++tick_;
+    tick_ = wrapTick(tick_ + 1);
 
     updateModPool(world_, tick_, W, H);
     applyModMatrix();

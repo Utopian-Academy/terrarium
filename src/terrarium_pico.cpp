@@ -139,7 +139,7 @@ int main(int argc, char** argv) {
   auto doTick = [&]() {
     step(world, rng, banner, tick);
     g_stepEvents.clear();  // no audio consumer in the pico build
-    ++tick;
+    tick = wrapTick(tick + 1);
     dirty = true;
   };
 

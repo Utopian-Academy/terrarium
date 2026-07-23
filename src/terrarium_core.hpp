@@ -418,6 +418,14 @@ Season seasonAt(int tick);
 float seasonLerp(int tick);
 bool nightish(int tick);
 
+// A kiosk vat runs for years: int tick would overflow (~414 days at 60 tps)
+// and sim-clock daylight would go permanently dark. Wrap by a multiple of
+// both the day cycle (8*DAY_TICKS = 7200) and the season cycle
+// (4*SEASON_TICKS = 3600) so every phase is preserved.
+inline int wrapTick(int t) {
+  return (t >= 1000000000) ? t - 999993600 : t;  // 999993600 = 7200 * 138888
+}
+
 // Day/night cycle. `level` is daylight 0..1 (smoothstep dawn/dusk ramps,
 // never a hard flip); `warm` tints the light: +1 = golden hour, 0 = neutral
 // noon, negative = cool moonlight.
