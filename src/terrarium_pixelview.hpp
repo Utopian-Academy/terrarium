@@ -332,14 +332,26 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
         }
         break;
       case 'f': case '+': case '&': case '!':
-        // Wildflower mix per-cell (was flat bubblegum pink/magenta):
-        // poppy, marigold, orchid, white, cornflower.
-        switch ((h >> 5) % 5u) {
-          case 0:  r = 225; g = 70 + j; b = 55; break;
-          case 1:  r = 255; g = 215 + j; b = 90; break;
-          case 2:  r = 175; g = 120 + j; b = 235; break;
-          case 3:  r = 248; g = 246; b = 238; break;
-          default: r = 120; g = 190 + j; b = 250; break;
+        if (w.biome == TROPICAL) {
+          // Lush island blooms: hibiscus, plumeria, bird-of-paradise,
+          // orchid, bougainvillea.
+          switch ((h >> 5) % 5u) {
+            case 0:  r = 255; g = 95 + j; b = 125; break;
+            case 1:  r = 255; g = 225 + j; b = 150; break;
+            case 2:  r = 255; g = 150 + j; b = 45; break;
+            case 3:  r = 230; g = 105 + j; b = 220; break;
+            default: r = 255; g = 125 + j; b = 175; break;
+          }
+        } else {
+          // Wildflower mix per-cell: poppy, marigold, orchid, white,
+          // cornflower.
+          switch ((h >> 5) % 5u) {
+            case 0:  r = 225; g = 70 + j; b = 55; break;
+            case 1:  r = 255; g = 215 + j; b = 90; break;
+            case 2:  r = 175; g = 120 + j; b = 235; break;
+            case 3:  r = 248; g = 246; b = 238; break;
+            default: r = 120; g = 190 + j; b = 250; break;
+          }
         }
         break;
       case '$': r = 220; g = 190 + j; b = 90; break;
