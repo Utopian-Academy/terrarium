@@ -201,6 +201,32 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
     if (t == KELP_GLYPH) { r = 24; g = 140 + j; b = 110; }
   }
 
+  // Depth when the world fills in: once vegetation covers everything the
+  // scene loses its value contrast, so shape the land itself —
+  // hillshade (NW light: facing slopes brighten, far slopes shadow) and
+  // canopy occlusion (cells buried in tall growth darken; clump edges
+  // stay lit, so forests read as sculpted masses).
+  if (tintable) {
+    int sgx = 0, sgy = 0;
+    if (x > 0 && x < W - 1) sgx = (int)w.height[y][x+1] - (int)w.height[y][x-1];
+    if (y > 0 && y < H - 1) sgy = (int)w.height[y+1][x] - (int)w.height[y-1][x];
+    float hill = 1.0f + std::max(-0.16f, std::min(0.20f, (float)(-sgx - sgy) * 0.010f));
+
+    int tall = 0;
+    for (int oy = -1; oy <= 1; ++oy) for (int ox = -1; ox <= 1; ++ox) {
+      if (!ox && !oy) continue;
+      int nx2 = x + ox, ny2 = y + oy;
+      if (nx2 < 0 || ny2 < 0 || nx2 >= W || ny2 >= H) continue;
+      char n = w.terrain[ny2][nx2];
+      if (n == 'T' || n == 'Y' || n == 'P' || n == '#') ++tall;
+    }
+    bool selfTall = (t == 'T' || t == 'Y' || t == 'P' || t == '#');
+    float ao = 1.0f - (selfTall ? 0.030f : 0.020f) * (float)tall;
+
+    float shape = hill * ao;
+    r = (int)(r * shape); g = (int)(g * shape); b = (int)(b * shape);
+  }
+
   // Season grade on terrain: autumn browns the foliage, spring vivifies,
   // winter cools — plus a frost/snow dusting on open ground in winter.
   if (tintable) {
