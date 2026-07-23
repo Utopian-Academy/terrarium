@@ -36,18 +36,16 @@ inline float pixelviewMote(uint32_t h, float animT, float lifeSec,
 // the shallows so sets roll continuously from open sea into the break.
 inline float pixelviewSwell(const World& w, int x, int y, float animT,
                             uint32_t h, float* grpOut) {
-  float base, ang;
-  if (w.island) {
-    float ccx = (float)W * 0.5f - 0.5f;
-    float ddx = (float)x - ccx, ddy = (float)y - ccx;
-    base = std::sqrt(ddx * ddx + ddy * ddy);
-    ang = std::atan2(ddy, ddx);
-  } else {
-    float wx2 = (w.wind.dx == 0 && w.wind.dy == 0) ? 0.8f : (float)w.wind.dx;
-    float wy2 = (w.wind.dx == 0 && w.wind.dy == 0) ? 0.5f : (float)w.wind.dy;
-    base = (float)x * wx2 + (float)y * wy2;
-    ang = 0.13f * (float)x - 0.11f * (float)y;
-  }
+  // A sea current, not a bullseye: one coherent directional flow across
+  // the whole ocean (radial island waves read as a clock face). Wind sets
+  // the heading; it veers slowly (~10 min) so the sea never goes static.
+  float wa = (w.wind.dx == 0 && w.wind.dy == 0)
+                 ? 0.7f
+                 : std::atan2((float)w.wind.dy, (float)w.wind.dx);
+  wa += 0.5f * std::sin(animT * 0.009f);
+  float ca = std::cos(wa), sa = std::sin(wa);
+  float base = (float)x * ca + (float)y * sa;
+  float ang = 0.13f * ((float)y * ca - (float)x * sa);
   float s1 = std::sin(0.42f * base + animT * 1.9f +
                       1.3f * std::sin(ang * 3.f + animT * 0.20f));
   float s2 = std::sin(0.23f * base + animT * 1.15f +
@@ -63,6 +61,7 @@ inline float pixelviewSwell(const World& w, int x, int y, float animT,
 struct PixelviewCast {
   float t = -1e9f;
   float birdX[3], birdY[3];
+  bool shipUp = false;
   float shipX, shipY, shipAng;
   bool whaleUp = false;
   float whaleX, whaleY, whaleAge;
@@ -81,9 +80,25 @@ inline PixelviewCast& pixelviewCast(float animT) {
       C.birdX[i] = cc + rad * std::cos(a);
       C.birdY[i] = cc + rad * std::sin(a);
     }
-    C.shipAng = animT * 0.045f;
-    C.shipX = cc + R * 0.85f * std::cos(C.shipAng);
-    C.shipY = cc + R * 0.85f * std::sin(C.shipAng);
+    // The ship comes and goes: every ~4 minutes she enters from beyond the
+    // edge, sails a straight passage that clears the island, and exits.
+    {
+      uint32_t sep = (uint32_t)(animT / 240.f);
+      uint32_t shh = hash3(sep, 0x5A11u, 0xB0A7u);
+      float age = animT - (float)sep * 240.f;
+      C.shipUp = age < 110.f;
+      if (C.shipUp) {
+        float th = (float)(shh & 1023u) / 1023.f * 6.283f;
+        float side = ((shh >> 12) & 1u) ? 1.f : -1.f;
+        float tx2 = cc + R * 0.82f * std::cos(th);
+        float ty2 = cc + R * 0.82f * std::sin(th);
+        float dirx = -std::sin(th) * side, diry = std::cos(th) * side;
+        float span = R * 1.35f;
+        C.shipX = tx2 + dirx * (-span + age * (2.f * span / 110.f));
+        C.shipY = ty2 + diry * (-span + age * (2.f * span / 110.f));
+        C.shipAng = std::atan2(diry, dirx);
+      }
+    }
     uint32_t wep = (uint32_t)(animT / 75.f);
     uint32_t wh = hash3(wep, 0x37A1Eu, 0x1234u);
     C.whaleAge = animT - (float)wep * 75.f;
@@ -576,7 +591,7 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
         }
       }
     }
-    {
+    if (C.shipUp && d > 0) {
       float dxs = fx - C.shipX, dys = fy - C.shipY;
       if (dxs * dxs + dys * dys < 2.4f) {  // hull
         rr = 108.f * br; gg = 76.f * br; bb = 48.f * br;
