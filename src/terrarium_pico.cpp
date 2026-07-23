@@ -221,11 +221,10 @@ int main(int argc, char** argv) {
     // tick-only redraw the Pi Zero 1 needs — except on firefly nights.
     static Uint32 lastAnimMs = 0;
     bool flowingWater = (world.biome != WETLAND && world.biome != DESERT);
-    bool fireflyNight = daylightNow(tick).level < 0.30f &&
-                        seasonAt(tick) != WINTER &&
-                        (world.biome == MEADOW || world.biome == WETLAND ||
-                         world.biome == TROPICAL);
-    if (!paused && (flowingWater || fireflyNight) && now - lastAnimMs >= 85) {
+    // Every biome has a night signature now (fireflies / aurora / shooting
+    // stars / spores), so nights always animate.
+    bool ambientNight = daylightNow(tick).level < 0.35f;
+    if (!paused && (flowingWater || ambientNight) && now - lastAnimMs >= 85) {
       lastAnimMs = now;
       dirty = true;
     }

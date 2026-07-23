@@ -284,6 +284,60 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
     }
   }
 
+  // Alpine aurora: slow green/violet curtains wash over the night.
+  if (w.biome == ALPINE && dl.level < 0.25f) {
+    float aph = (float)x * 0.05f + (float)y * 0.02f;
+    float a1 = std::sin(aph + animT * 0.50f);  a1 = a1 > 0.f ? a1 * a1 : 0.f;
+    float a2 = std::sin(aph * 0.7f - animT * 0.33f + 2.1f);
+    a2 = a2 > 0.f ? a2 * a2 : 0.f;
+    float br = displayBrightness();
+    rr += 14.f * a2 * br;
+    gg += (26.f * a1 + 10.f * a2) * br;
+    bb += (16.f * a1 + 22.f * a2) * br;
+  }
+
+  // Desert night: starlight twinkle, and now and then a shooting star.
+  if (w.biome == DESERT && dl.level < 0.25f) {
+    float br = displayBrightness();
+    uint32_t epoch = (uint32_t)(animT * 0.25f);
+    uint32_t st = hash3((uint32_t)x, (uint32_t)y, epoch * 2654435761u ^ 0xDE5E27u);
+    if ((st % 1200u) == 0u) {
+      float p = 0.5f + 0.5f * std::sin(animT * 4.0f + (float)(st & 31u));
+      p = p * p * br;
+      rr += 175.f * p; gg += 190.f * p; bb += 220.f * p;
+    }
+    uint32_t sep = (uint32_t)(animT / 40.0f);
+    uint32_t se = hash3(sep, 0x57A2u, w.worldSeed);
+    float t0 = (float)sep * 40.0f + (float)(se % 860u) / 25.0f;
+    float tt = animT - t0;
+    if (tt > 0.f && tt < 1.2f) {
+      float px = (float)((se >> 8) & 127u) / 127.f * (float)W + tt * 90.f;
+      float py = (float)((se >> 16) & 63u) / 63.f * (float)H * 0.5f + tt * 38.f;
+      float ddx = (float)x - px, ddy = (float)y - py;
+      float dist2 = ddx * ddx + ddy * ddy;
+      if (dist2 < 2.5f) { rr += 230.f * br; gg += 235.f * br; bb += 240.f * br; }
+      else {
+        float back = (ddx * -90.f + ddy * -38.f) / 97.7f;
+        if (back > 0.f && back < 7.f && dist2 - back * back < 1.8f) {
+          float fade = (1.f - back / 7.f) * 0.8f * br;
+          rr += 200.f * fade; gg += 205.f * fade; bb += 215.f * fade;
+        }
+      }
+    }
+  }
+
+  // Alien night: bioluminescent spores drift slowly upward.
+  if (w.biome == ALIEN && dl.level < 0.35f && d == 0) {
+    uint32_t yy = (uint32_t)((float)y + animT * 2.2f);
+    uint32_t sp2 = hash3((uint32_t)x, yy, 0xA11E17u ^ w.worldSeed);
+    if ((sp2 % 800u) == 0u) {
+      float p = (0.5f + 0.5f * std::sin(animT * 2.0f + (float)(sp2 & 63u))) *
+                displayBrightness();
+      if (sp2 & 64u) { rr += 90.f * p; gg += 200.f * p; bb += 210.f * p; }
+      else           { rr += 200.f * p; gg += 80.f * p; bb += 220.f * p; }
+    }
+  }
+
   // Storm lightning: single-tick global flashes (the sim's strikes were
   // invisible at 1px/cell — the whole sky flickering sells the storm).
   if (w.weather.state == STORM && (hash3((uint32_t)tick, 99u, 7u) % 19u) == 0u) {
