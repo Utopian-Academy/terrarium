@@ -120,9 +120,24 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
         int lift = (int)(ripple * 14.f);
         r += lift / 2; g += lift; b += lift;
         if (ripple > 0.92f) { r += 50; g += 55; b += 50; }  // whitewater glints
+      } else if (!stillBiome && d >= 4) {
+        // Deep water: calm and textured, never banded — the height field
+        // is flat out here, so contour surf would pulse in giant rings.
+        // Two crossing low swells with per-cell phase noise (Dwarf
+        // Fortress shimmer), plus rare slow glints (Noita highlights).
+        float p1 = std::sin(0.55f * (float)x + 0.35f * (float)y - animT * 0.9f +
+                            (float)(h & 7u) * 0.35f);
+        float p2 = std::sin(0.30f * (float)x - 0.45f * (float)y + animT * 0.6f +
+                            (float)((h >> 3) & 7u) * 0.35f);
+        float swell = 0.6f * p1 + 0.4f * p2;
+        int lift = (int)(swell * 6.f);
+        r += lift / 2; g += lift; b += lift;
+        uint32_t gh2 = hash3((uint32_t)x, (uint32_t)y, 0x0CEA11u ^ w.worldSeed);
+        float gl = pixelviewMote(gh2, animT, 4.0f, 2600u, 2.0f);
+        r += (int)(60.f * gl); g += (int)(70.f * gl); b += (int)(80.f * gl);
       } else if (!stillBiome) {
-        // Surf: primary crest follows height contours shoreward, a softer
-        // wind swell crosses it so open water never looks striped.
+        // Shallows: contour surf — crests follow the rising seabed toward
+        // shore (Surf Sandbox), with a soft crossing wind swell.
         float shorePh = (float)w.height[y][x] * 0.55f - animT * 3.0f;
         float wx = (w.wind.dx == 0 && w.wind.dy == 0) ? 1.0f : (float)w.wind.dx;
         float wy = (w.wind.dx == 0 && w.wind.dy == 0) ? 0.3f : (float)w.wind.dy;
@@ -131,7 +146,7 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
         float swell = std::sin(openPh);
         float ripple = 0.7f * crest + 0.4f * swell;
 
-        int lift = (int)(ripple * (d >= 4 ? 11.f : 16.f));
+        int lift = (int)(ripple * 16.f);
         r += lift / 2; g += lift; b += lift;
 
         // Breaking: near shore the crest goes foam-white, with a softer
