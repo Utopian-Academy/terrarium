@@ -20,6 +20,11 @@ Layout computeLayout(SDL_Renderer* ren, bool showHud = true);
 struct GlyphCache {
   std::unordered_map<unsigned char, SDL_Texture*> tex;
   bool textMode = false;
+  // Purpose-built micro font for tiny cells (kiosk panels): hand-drawn 4x4
+  // hero glyphs, OR-downsampled 8x8 for the rest (ink never drops out the
+  // way it does when SDL nearest-scales an 8x8 texture down). microSize 8
+  // = off, 4 = 4x4 marks, 2 = 2x2 marks (OR-folded from the 4x4s).
+  int microSize = 8;
 
   void destroy();
   SDL_Texture* makeGlyph(SDL_Renderer* ren, unsigned char c);

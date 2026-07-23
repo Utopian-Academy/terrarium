@@ -734,6 +734,75 @@ const uint8_t* glyph8_text(unsigned char c) {
 #undef R
 }
 
+// Hand-drawn 4x4 micro glyphs (top nibble of each row byte). Distinct
+// silhouettes at panel scale: tree = mast, mushroom = cap, flower = head on
+// a stem, stone = mound. Returns nullptr when a glyph has no hand-drawn
+// version (caller OR-downsamples the 8x8 instead).
+const uint8_t* glyph4_world(unsigned char c) {
+  static const uint8_t G_COMMA[4] = {0x00, 0x00, 0x40, 0x80};
+  static const uint8_t G_TGRASS[4] = {0xA0, 0xA0, 0x00, 0x00};
+  static const uint8_t G_SEMI[4] = {0x00, 0x40, 0x40, 0x80};
+  static const uint8_t G_MOSS[4] = {0xA0, 0x00, 0x50, 0x00};
+  static const uint8_t G_SHRUB[4] = {0x00, 0x60, 0xF0, 0x60};
+  static const uint8_t G_TREE1[4] = {0x40, 0xE0, 0x40, 0x40};
+  static const uint8_t G_TREE2[4] = {0xA0, 0x40, 0x40, 0x40};
+  static const uint8_t G_PALM[4] = {0xE0, 0x40, 0x40, 0x60};
+  static const uint8_t G_MUSH[4] = {0xF0, 0xF0, 0x60, 0x60};
+  static const uint8_t G_FLOW1[4] = {0x40, 0xA0, 0x40, 0x40};
+  static const uint8_t G_FLOW2[4] = {0x40, 0xE0, 0x40, 0x00};
+  static const uint8_t G_BIGF[4] = {0x60, 0xF0, 0xF0, 0x60};
+  static const uint8_t G_SUPERB[4] = {0xA0, 0xF0, 0xF0, 0x40};
+  static const uint8_t G_FRUIT[4] = {0x20, 0x60, 0xF0, 0x60};
+  static const uint8_t G_STONE[4] = {0x00, 0x40, 0xE0, 0xF0};
+  static const uint8_t G_BOULDER[4] = {0x00, 0x60, 0xF0, 0xF0};
+  static const uint8_t G_MOUNT[4] = {0x00, 0x40, 0xA0, 0xF0};
+  static const uint8_t G_STAR[4] = {0xA0, 0x40, 0xA0, 0x00};
+  static const uint8_t G_WAVE[4] = {0x00, 0x50, 0xA0, 0x00};
+  static const uint8_t G_FOAM[4] = {0x00, 0xF0, 0x00, 0xF0};
+  static const uint8_t G_BURNT[4] = {0x90, 0x60, 0x60, 0x90};
+  static const uint8_t G_SAND[4] = {0x00, 0x50, 0x00, 0xA0};
+  static const uint8_t G_CLOVER[4] = {0x60, 0x40, 0x60, 0x00};
+  static const uint8_t G_MUD0[4] = {0x00, 0x50, 0xA0, 0x50};
+  static const uint8_t G_MUD1[4] = {0x00, 0xA0, 0x50, 0xA0};
+  static const uint8_t G_MUD2[4] = {0x50, 0xA0, 0x00, 0xA0};
+  static const uint8_t G_RAIN_V[4] = {0x40, 0x40, 0x40, 0x40};
+  static const uint8_t G_RAIN_S[4] = {0x10, 0x20, 0x40, 0x80};
+  static const uint8_t G_RAIN_B[4] = {0x80, 0x40, 0x20, 0x10};
+
+  switch (c) {
+    case ',': return G_COMMA;
+    case '"': return G_TGRASS;
+    case ';': return G_SEMI;
+    case ':': return G_MOSS;
+    case '#': return G_SHRUB;
+    case 'T': return G_TREE1;
+    case 'Y': return G_TREE2;
+    case 'P': return G_PALM;
+    case 'm': return G_MUSH;
+    case 'f': return G_FLOW1;
+    case '+': return G_FLOW2;
+    case '&': return G_BIGF;
+    case '!': return G_SUPERB;
+    case '$': return G_FRUIT;
+    case '^': return G_STONE;
+    case 'B': return G_BOULDER;
+    case 'M': return G_MOUNT;
+    case '*': return G_STAR;
+    case '~': return G_WAVE;
+    case '=': return G_FOAM;
+    case 'x': return G_BURNT;
+    case 's': return G_SAND;
+    case 'c': return G_CLOVER;
+    case 'd': return G_MUD0;
+    case 'e': return G_MUD1;
+    case 'g': return G_MUD2;
+    case '|': return G_RAIN_V;
+    case '/': return G_RAIN_S;
+    case '\\': return G_RAIN_B;
+    default: return nullptr;
+  }
+}
+
 }  // namespace
 
 void GlyphCache::destroy() {
@@ -742,8 +811,11 @@ void GlyphCache::destroy() {
 }
 
 SDL_Texture* GlyphCache::makeGlyph(SDL_Renderer* renderer, unsigned char c) {
-  SDL_Texture* texture = SDL_CreateTexture(
-      renderer, SDL_PIXELFORMAT_ARGB8888, SDL_TEXTUREACCESS_STREAMING, 8, 8);
+  const bool micro = (microSize < 8) && !textMode;
+  const int size = micro ? microSize : 8;
+  SDL_Texture* texture =
+      SDL_CreateTexture(renderer, SDL_PIXELFORMAT_ARGB8888,
+                        SDL_TEXTUREACCESS_STREAMING, size, size);
   if (!texture) return nullptr;
 
   SDL_SetTextureBlendMode(texture, SDL_BLENDMODE_BLEND);
@@ -755,16 +827,52 @@ SDL_Texture* GlyphCache::makeGlyph(SDL_Renderer* renderer, unsigned char c) {
     return nullptr;
   }
 
-  for (int y = 0; y < 8; ++y) {
+  for (int y = 0; y < size; ++y) {
     uint32_t* row = (uint32_t*)((uint8_t*)pixels + y * pitch);
-    for (int x = 0; x < 8; ++x) row[x] = 0x00000000;
+    for (int x = 0; x < size; ++x) row[x] = 0x00000000;
   }
 
-  const uint8_t* glyph = textMode ? glyph8_text(c) : glyph8_world(c);
-  for (int y = 0; y < 8; ++y) {
+  uint8_t bitmap[8];
+  if (micro) {
+    uint8_t m4[4];
+    const uint8_t* hand = glyph4_world(c);
+    if (hand) {
+      for (int y = 0; y < 4; ++y) m4[y] = hand[y];
+    } else {
+      // OR-downsample the 8x8: a 2x2 block with any ink stays inked, so
+      // thin strokes survive (nearest-scaling drops whole rows instead).
+      const uint8_t* g8 = glyph8_world(c);
+      for (int y = 0; y < 4; ++y) {
+        uint8_t merged = (uint8_t)(g8[y * 2] | g8[y * 2 + 1]);
+        uint8_t out = 0;
+        for (int x = 0; x < 4; ++x) {
+          if ((merged & (0xC0u >> (x * 2))) != 0) out |= (uint8_t)(0x80u >> x);
+        }
+        m4[y] = out;
+      }
+    }
+    if (microSize == 2) {
+      // Fold once more to 2x2 marks; color carries most of the identity at
+      // this scale, the mark shape adds texture (tree = column, grass = dot).
+      for (int y = 0; y < 2; ++y) {
+        uint8_t merged = (uint8_t)(m4[y * 2] | m4[y * 2 + 1]);
+        uint8_t out = 0;
+        if ((merged & 0xC0u) != 0) out |= 0x80u;
+        if ((merged & 0x30u) != 0) out |= 0x40u;
+        bitmap[y] = out;
+      }
+    } else {
+      for (int y = 0; y < 4; ++y) bitmap[y] = m4[y];
+    }
+  } else {
+    const uint8_t* glyph = textMode ? glyph8_text(c) : glyph8_world(c);
+    for (int y = 0; y < 8; ++y) bitmap[y] = glyph[y];
+  }
+
+  for (int y = 0; y < size; ++y) {
     uint32_t* row = (uint32_t*)((uint8_t*)pixels + y * pitch);
-    uint8_t bits = glyph[y];
-    for (int x = 0; x < 8; ++x) {
+    uint8_t bits = bitmap[y];
+    for (int x = 0; x < size; ++x) {
       if ((bits & (0x80u >> x)) != 0) row[x] = 0xE0FFFFFF;
     }
   }

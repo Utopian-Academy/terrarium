@@ -14,6 +14,8 @@ struct CliOptions {
   bool wantSynth = false;
   bool wantMidi = false;
   bool printVersion = false;
+  bool kiosk = false;  // start straight into the world, no menu
+  int microFont = 8;   // world glyph size: 8 = full, 4 or 2 = micro marks
   std::string sf2Path = defaultSf2Path();
   float synthGain = 0.7f;
   std::string synthAudioDriver;
@@ -124,6 +126,14 @@ CliOptions parseCliOptions(int argc, char** argv) {
       options.uiLang = parseUiLanguage(argv[++i]);
     } else if (std::strcmp(argv[i], "--version") == 0) {
       options.printVersion = true;
+    } else if (std::strcmp(argv[i], "--kiosk") == 0) {
+      options.kiosk = true;
+    } else if (std::strcmp(argv[i], "--microfont") == 0) {
+      options.microFont = 4;
+      if (i + 1 < argc && (std::strcmp(argv[i + 1], "2") == 0 ||
+                           std::strcmp(argv[i + 1], "4") == 0)) {
+        options.microFont = std::atoi(argv[++i]);
+      }
     }
   }
   return options;
@@ -169,6 +179,7 @@ bool createWindowAndRenderer(const CliOptions& options,
 
   SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "0");
   resources.worldGlyphs.textMode = false;
+  resources.worldGlyphs.microSize = options.microFont;
   resources.textGlyphs.textMode = true;
   resources.layout = computeLayout(resources.renderer);
   return true;
@@ -589,6 +600,7 @@ int runTerrarium(int argc, char** argv) {
   initializeSynth(options, resources);
 
   LoopState loop;
+  if (options.kiosk) loop.showMenu = false;
   if (patchLoaded) {
     loop.rootKey = patchRootKey;
     loop.scaleType = (ScaleType)patchScale;
