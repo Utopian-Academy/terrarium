@@ -274,6 +274,10 @@ struct World {
   // falloff into a surrounding ocean ring; map edges act as open sea.
   // Set once before the first seedWorld — persists across reseeds.
   bool island = false;
+  // Volcano (1-in-3 volcanic islands): crater vent position, and the tick
+  // the current eruption ends (0 = dormant).
+  int ventX = -1, ventY = -1;
+  int eruptEnd = 0;
   Grid terrain;
   Grid entities;
   Water water;

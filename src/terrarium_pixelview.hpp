@@ -393,6 +393,7 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
           }
         }
         break;
+      case 'V': r = 46; g = 38 + j / 2; b = 40; break;  // basalt vent
       case '$': r = 220; g = 190 + j; b = 90; break;
       case 'd': case 'e': case 'g': r = 105 + j; g = 70; b = 44; break;
       case '^': case 'B': r = 130 + j; g = 130 + j; b = 142; break;
@@ -704,6 +705,43 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
         if (dxb * dxb + dyb * dyb < 0.9f) {
           float flap = 0.75f + 0.25f * std::sin(animT * 7.f + (float)i * 2.1f);
           rr = 238.f * flap * br; gg = 240.f * flap * br; bb = 244.f * flap * br;
+        }
+      }
+    }
+  }
+
+  // Volcano: the crater breathes a faint glow when dormant (strongest at
+  // night); during an eruption the vent floods with lava light, embers
+  // scatter downwind, and smoke hazes the slopes.
+  if (w.ventX >= 0) {
+    float br = displayBrightness();
+    float vdx = (float)x - (float)w.ventX, vdy = (float)y - (float)w.ventY;
+    float vd2 = vdx * vdx + vdy * vdy;
+    bool erupting = (w.eruptEnd > tick);
+    if (!erupting && vd2 < 3.5f) {
+      float breathe = 0.5f + 0.5f * std::sin(animT * 0.8f);
+      float glow = (0.25f + 0.45f * (1.f - dl.level)) * breathe *
+                   (1.f - vd2 / 3.5f) * br;
+      rr += 160.f * glow; gg += 55.f * glow; bb += 15.f * glow;
+    }
+    if (erupting) {
+      float fury = std::min(1.f, (float)(w.eruptEnd - tick) / 120.f);
+      if (vd2 < 9.f) {  // lava light
+        float f = (1.f - vd2 / 9.f) * (0.65f + 0.35f * std::sin(animT * 7.f)) * br;
+        rr += 255.f * f * fury; gg += 130.f * f * fury; bb += 25.f * f * fury;
+      }
+      if (vd2 < 240.f && d == 0) {  // embers drifting downwind
+        float wdot = vdx * (float)w.wind.dx + vdy * (float)w.wind.dy;
+        uint32_t eh = hash3((uint32_t)x, (uint32_t)y, 0xE38E5u ^ w.worldSeed);
+        float em = pixelviewMote(eh, animT, 2.2f, wdot > 0.f ? 240u : 700u, 6.f);
+        em *= fury * br;
+        rr += 230.f * em; gg += 120.f * em; bb += 25.f * em;
+        // smoke haze thickens downwind of the vent
+        if (wdot > 0.f) {
+          float haze = std::min(1.f, wdot / 16.f) * (1.f - vd2 / 240.f) * 0.35f * fury;
+          rr = rr * (1.f - haze) + 70.f * haze * br;
+          gg = gg * (1.f - haze) + 66.f * haze * br;
+          bb = bb * (1.f - haze) + 68.f * haze * br;
         }
       }
     }

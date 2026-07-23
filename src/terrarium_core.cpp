@@ -1305,6 +1305,27 @@ for (int y=0;y<H;++y) for (int x=0;x<W;++x) {
         }
       }
     }
+
+    // One island in three is volcanic: a basalt cone at its heart.
+    w.ventX = -1; w.ventY = -1; w.eruptEnd = 0;
+    if (r.oneIn(3)) {
+      int vx = W / 2 + r.i(-W / 12, W / 12);
+      int vy = H / 2 + r.i(-H / 12, H / 12);
+      float coneR = (float)W * 0.14f;
+      for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) {
+        float dx = (float)(x - vx), dy = (float)(y - vy);
+        float t = std::sqrt(dx * dx + dy * dy) / coneR;
+        if (t > 1.f) continue;
+        int hh = 200 + (int)((1.f - t) * 55.f);
+        w.height[y][x] = (uint8_t)std::max((int)w.height[y][x], hh);
+        w.water[y][x] = 0;
+        if (t < 0.20f) w.terrain[y][x] = 'B';        // crater rim rock
+        else if (t < 0.55f && r.oneIn(2)) w.terrain[y][x] = '^';
+      }
+      w.terrain[vy][vx] = 'V';
+      if (inBounds(vx + 1, vy)) w.terrain[vy][vx + 1] = 'V';
+      w.ventX = vx; w.ventY = vy;
+    }
   }
 }
 
@@ -1616,6 +1637,9 @@ static void stepTerrain(World& w, Rng& r, Season s, int tick) {
       if (r.oneIn(160)) next[y][x] = 's';
       continue;
     }
+
+    // The volcanic vent is eternal rock — nothing grows there.
+    if (c == 'V') continue;
 
     // altitude drives ecology (mountains sparser, valleys richer)
     uint8_t alt = w.height[y][x];
@@ -2418,6 +2442,21 @@ void step(World& w, Rng& r, std::string& banner, int tick) {
 
   if (w.weather.state == STORM && r.oneIn(35)) lightning(w, r, banner);
   maybeChaos(w, r, banner, s);
+
+  // Volcano: long dormancy, then a few minutes of eruption — lava light,
+  // embers, and fires seeded down the slopes (the fire/regrowth ecology
+  // handles the aftermath; the scar heals over the next day).
+  if (w.ventX >= 0) {
+    if (w.eruptEnd <= tick && r.oneIn(35000)) {
+      w.eruptEnd = tick + 500;
+      banner = "the mountain wakes";
+    }
+    if (w.eruptEnd > tick && r.oneIn(4)) {
+      int ex = w.ventX + r.i(-12, 12), ey = w.ventY + r.i(-12, 12);
+      if (inBounds(ex, ey) && w.water[ey][ex] == 0 && isVeg(w.terrain[ey][ex]))
+        w.terrain[ey][ex] = '*';
+    }
+  }
 
   stepWater(w, r);
   waterSinks(w, r, s);
