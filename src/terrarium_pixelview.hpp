@@ -222,8 +222,18 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
         float grp;
         float swell = pixelviewSwell(w, x, y, animT, h, &grp);
         float crest = swell * std::fabs(swell);  // sharpen up, soften down
-        int lift = (int)(crest * 15.f);
-        r += lift / 2; g += lift; b += (int)(lift * 1.1f);
+        // The whole wave body carries color (Surf Sandbox bands): troughs
+        // sink toward deep navy, crests lift toward teal...
+        float t01 = crest * 0.5f + 0.5f;
+        r = (int)((float)r * 0.75f + t01 * 26.f);
+        g = (int)((float)g * 0.80f + t01 * 52.f);
+        b = (int)((float)b * 0.85f + t01 * 55.f);
+        // ...an aqua face rides just below each crest...
+        if (crest > 0.25f && crest <= 0.62f) {
+          float f = (crest - 0.25f) / 0.37f * 0.45f;
+          r += (int)(20.f * f); g += (int)(70.f * f); b += (int)(60.f * f);
+        }
+        // ...and whitecaps top the strongest sets.
         if (crest > 0.60f) {
           float f = (crest - 0.60f) / 0.40f * 0.55f;
           r = (int)(r + (205 - r) * f);
