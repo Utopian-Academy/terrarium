@@ -338,6 +338,75 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
     }
   }
 
+  // Day life, one signature per biome: butterflies, dragonfly glints,
+  // heat shimmer, snow glitter, prismatic motes.
+  if (dl.level > 0.85f) {
+    float br = displayBrightness();
+    if ((w.biome == MEADOW || w.biome == TROPICAL) && d == 0 && e == ' ' &&
+        season != WINTER) {
+      uint32_t epoch = (uint32_t)(animT * 0.5f);
+      uint32_t bh = hash3((uint32_t)x, (uint32_t)y,
+                          epoch * 3266489917u ^ w.worldSeed);
+      if ((bh % 1100u) == 0u) {
+        float p = (0.55f + 0.45f * std::sin(animT * 9.0f + (float)(bh & 63u))) * br;
+        if (w.biome == MEADOW) {
+          switch ((bh >> 8) % 3u) {  // cabbage white, gold, monarch
+            case 0:  rr += 190.f * p; gg += 190.f * p; bb += 180.f * p; break;
+            case 1:  rr += 205.f * p; gg += 175.f * p; bb += 60.f * p; break;
+            default: rr += 215.f * p; gg += 120.f * p; bb += 45.f * p; break;
+          }
+        } else {
+          switch ((bh >> 8) % 3u) {  // morpho, orchid, sulphur
+            case 0:  rr += 65.f * p;  gg += 160.f * p; bb += 210.f * p; break;
+            case 1:  rr += 205.f * p; gg += 65.f * p;  bb += 150.f * p; break;
+            default: rr += 205.f * p; gg += 180.f * p; bb += 50.f * p; break;
+          }
+        }
+      }
+    }
+    if (w.biome == WETLAND && d == 0) {
+      bool nearWater = (x > 0 && w.water[y][x-1] > 0) ||
+                       (x < W-1 && w.water[y][x+1] > 0) ||
+                       (y > 0 && w.water[y-1][x] > 0) ||
+                       (y < H-1 && w.water[y+1][x] > 0);
+      if (nearWater) {
+        uint32_t epoch = (uint32_t)(animT * 0.8f);
+        uint32_t dh = hash3((uint32_t)x, (uint32_t)y,
+                            epoch * 2246822519u ^ 0xD2A60Fu);
+        if ((dh % 900u) == 0u) {
+          float p = std::sin(animT * 12.0f + (float)(dh & 31u));
+          p = (p > 0.f ? p * p : 0.f) * br;  // quick darting flashes
+          rr += 60.f * p; gg += 205.f * p; bb += 195.f * p;
+        }
+      }
+    }
+    if (w.biome == DESERT && dl.level > 0.95f) {
+      float sh2 = std::sin((float)y * 0.35f + (float)x * 0.07f + animT * 1.6f) *
+                  std::sin((float)x * 0.22f - animT * 1.1f);
+      float amp = 5.0f * br;
+      rr += sh2 * amp; gg += sh2 * amp * 0.9f; bb += sh2 * amp * 0.7f;
+    }
+    if (w.biome == ALPINE && d == 0) {
+      uint32_t epoch = (uint32_t)(animT * 1.2f);
+      uint32_t gh = hash3((uint32_t)x, (uint32_t)y, epoch * 2654435761u ^ 0x911770u);
+      if ((gh % 1500u) == 0u) {
+        float p = std::sin(animT * 10.0f + (float)(gh & 31u));
+        p = (p > 0.f ? p * p * p : 0.f) * br;  // sharp glints
+        rr += 200.f * p; gg += 205.f * p; bb += 215.f * p;
+      }
+    }
+    if (w.biome == ALIEN && d == 0) {
+      uint32_t epoch = (uint32_t)(animT * 0.4f);
+      uint32_t ph2 = hash3((uint32_t)x, (uint32_t)y, epoch * 3266489917u ^ 0xA71E20u);
+      if ((ph2 % 1300u) == 0u) {
+        float base = animT * 1.3f + (float)(ph2 & 63u);
+        rr += (60.f + 60.f * std::sin(base)) * br;
+        gg += (60.f + 60.f * std::sin(base + 2.09f)) * br;
+        bb += (60.f + 60.f * std::sin(base + 4.19f)) * br;
+      }
+    }
+  }
+
   // Storm lightning: single-tick global flashes (the sim's strikes were
   // invisible at 1px/cell — the whole sky flickering sells the storm).
   if (w.weather.state == STORM && (hash3((uint32_t)tick, 99u, 7u) % 19u) == 0u) {

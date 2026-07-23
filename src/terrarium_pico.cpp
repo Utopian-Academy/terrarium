@@ -220,11 +220,10 @@ int main(int argc, char** argv) {
     // between sim ticks when either is visible. Stillwater biomes keep the
     // tick-only redraw the Pi Zero 1 needs — except on firefly nights.
     static Uint32 lastAnimMs = 0;
-    bool flowingWater = (world.biome != WETLAND && world.biome != DESERT);
-    // Every biome has a night signature now (fireflies / aurora / shooting
-    // stars / spores), so nights always animate.
-    bool ambientNight = daylightNow(tick).level < 0.35f;
-    if (!paused && (flowingWater || ambientNight) && now - lastAnimMs >= 85) {
+    // Every biome now has day and night ambient life (butterflies, surf,
+    // fireflies, aurora, shimmer...), so always repaint ~12fps. (A Pi
+    // Zero 1 build could re-gate this; the Zero 2 kiosk doesn't blink.)
+    if (!paused && now - lastAnimMs >= 85) {
       lastAnimMs = now;
       dirty = true;
     }
