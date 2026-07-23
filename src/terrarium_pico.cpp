@@ -74,8 +74,8 @@ PicoOptions parseArgs(int argc, char** argv) {
 }
 
 // Cell colors live in terrarium_pixelview.hpp (shared with the plugin UI).
-uint32_t cellColor(const World& w, int x, int y, int tick) {
-  PixelviewRGB c = pixelviewCellColor(w, x, y, tick);
+uint32_t cellColor(const World& w, int x, int y, int tick, float animT) {
+  PixelviewRGB c = pixelviewCellColor(w, x, y, tick, animT);
   return 0xFF000000u | ((uint32_t)c.r << 16) | ((uint32_t)c.g << 8) |
          (uint32_t)c.b;  // SDL ARGB8888
 }
@@ -216,6 +216,16 @@ int main(int argc, char** argv) {
       doTick();
     }
 
+    // Water motion runs on wall-clock time: repaint ~12fps between sim
+    // ticks in biomes with flowing water (wetland/desert stay stillwater
+    // and keep the tick-only redraw the Pi Zero 1 needs).
+    static Uint32 lastAnimMs = 0;
+    if (!paused && world.biome != WETLAND && world.biome != DESERT &&
+        now - lastAnimMs >= 85) {
+      lastAnimMs = now;
+      dirty = true;
+    }
+
 #ifdef TERRA_PICO_PROF
     double profT2 = profClock();
     profTickMs += profT2 - profT1;
@@ -225,9 +235,11 @@ int main(int argc, char** argv) {
       void* pixels = nullptr;
       int pitch = 0;
       if (SDL_LockTexture(frame, nullptr, &pixels, &pitch) == 0) {
+        float animT = (float)SDL_GetTicks() * 0.001f;
         for (int y = 0; y < H; ++y) {
           uint32_t* row = (uint32_t*)((uint8_t*)pixels + y * pitch);
-          for (int x = 0; x < W; ++x) row[x] = cellColor(world, x, y, tick);
+          for (int x = 0; x < W; ++x)
+            row[x] = cellColor(world, x, y, tick, animT);
         }
         SDL_UnlockTexture(frame);
       }

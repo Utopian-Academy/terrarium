@@ -25,7 +25,11 @@ inline uint8_t pixelviewCloudAt(const World& w, int x, int y) {
 
 // Shaded per-cell color: entities, overlays, water, terrain, then season,
 // cloud shadow, lightning, and the day/night cycle.
-inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick) {
+// animT: seconds for water motion; pass wall-clock time for smooth flow
+// between sim ticks (defaults to tick-derived time when negative).
+inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
+                                       float animT = -1.0f) {
+  if (animT < 0.0f) animT = (float)tick * 0.2f;
   // Small stable per-cell jitter so flat areas read as texture, not banding.
   uint32_t h = hash3((uint32_t)x, (uint32_t)y, w.worldSeed);
   int j = (int)(h & 15u) - 8;
@@ -67,6 +71,58 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick) {
     b = 150 + dd * 13 + j;
     // sparse foam shimmer
     if (((h >> 4) + (uint32_t)(tick / 6)) % 97u == 0u) { r = g = b = 235; }
+
+    // Water in motion — stagnant reads dead outside wetland/oasis.
+    // Rivers (steep gradient): light bands travel downhill. Open water:
+    // surf — wave crests ride the height contours, so as time advances
+    // they sweep toward the shallows and break white where they land.
+    if (w.biome != WETLAND && w.biome != DESERT) {
+      int gx = 0, gy = 0;
+      if (x > 0 && x < W - 1) gx = (int)w.height[y][x-1] - (int)w.height[y][x+1];
+      if (y > 0 && y < H - 1) gy = (int)w.height[y-1][x] - (int)w.height[y+1][x];
+      bool river = (std::abs(gx) + std::abs(gy) >= 3) && d <= 3;
+
+      if (river) {
+        float fx = (float)((gx > 0) - (gx < 0));
+        float fy = (float)((gy > 0) - (gy < 0));
+        float ph = 0.8f * ((float)x * fx + (float)y * fy) - animT * 2.8f;
+        float ripple = std::sin(ph + 0.7f * std::sin(ph * 0.37f + (float)(h & 7u)));
+        int lift = (int)(ripple * 14.f);
+        r += lift / 2; g += lift; b += lift;
+        if (ripple > 0.92f) { r += 50; g += 55; b += 50; }  // whitewater glints
+      } else {
+        // Surf: primary crest follows height contours shoreward, a softer
+        // wind swell crosses it so open water never looks striped.
+        float shorePh = (float)w.height[y][x] * 0.55f - animT * 3.0f;
+        float wx = (w.wind.dx == 0 && w.wind.dy == 0) ? 1.0f : (float)w.wind.dx;
+        float wy = (w.wind.dx == 0 && w.wind.dy == 0) ? 0.3f : (float)w.wind.dy;
+        float openPh = 0.35f * ((float)x * wx + (float)y * wy) - animT * 1.1f;
+        float crest = std::sin(shorePh + 0.5f * std::sin(shorePh * 0.31f + (float)(h & 7u)));
+        float swell = std::sin(openPh);
+        float ripple = 0.7f * crest + 0.4f * swell;
+
+        int lift = (int)(ripple * (d >= 4 ? 11.f : 16.f));
+        r += lift / 2; g += lift; b += lift;
+
+        // Breaking: near shore the crest goes foam-white, with a softer
+        // spray band just behind it.
+        bool nearShore = false;
+        for (int oy = -1; oy <= 1 && !nearShore; ++oy)
+          for (int ox = -1; ox <= 1; ++ox) {
+            int nx2 = x + ox, ny2 = y + oy;
+            if (nx2 < 0 || ny2 < 0 || nx2 >= W || ny2 >= H) continue;
+            if (w.water[ny2][nx2] == 0) { nearShore = true; break; }
+          }
+        if (nearShore && crest > 0.55f) {
+          float f = (crest - 0.55f) / 0.45f;  // 0..1 into the break
+          r = (int)(r + (228 - r) * f);
+          g = (int)(g + (238 - g) * f);
+          b = (int)(b + (246 - b) * f);
+        } else if (d <= 2 && crest > 0.80f) {
+          r += 35; g += 40; b += 38;  // shallow crest sparkle offshore
+        }
+      }
+    }
   } else {
     tintable = true;
     // Foliage picks a per-cell green *family* (yellow-green, deep forest,
