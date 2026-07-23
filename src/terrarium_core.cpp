@@ -1240,7 +1240,10 @@ for (int k=0; k<moves; ++k) {
     for (int i=0; i<6; ++i) {
       int nx=x+dirs[i][0], ny=y+dirs[i][1];
       if (!inBounds(nx,ny)) continue;
-      int score = (int)next[ny][nx]*10 + i;
+      // Gravity: water seeks the lowest *surface* (terrain height + depth),
+      // so it genuinely runs downhill, pools in basins, and overflows —
+      // previously it only equalized depth and drifted with the wind.
+      int score = (int)next[ny][nx]*10 + (int)w.height[ny][nx] + i;
 
       if (w.wind.strength>0) {
         int dot = dirs[i][0]*w.wind.dx + dirs[i][1]*w.wind.dy;
