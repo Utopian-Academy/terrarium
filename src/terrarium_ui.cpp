@@ -57,6 +57,8 @@ const char* menuBiomeName(Biome biome) {
       return "ALIEN";
     case CITY:
       return "CITY";
+    case OCEAN:
+      return "OCEAN";
   }
   return "?";
 }

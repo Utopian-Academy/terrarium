@@ -216,10 +216,11 @@ inline int countNeighborsChar(const Grid& g, int x, int y, char c) {
 
 enum Season { SPRING=0, SUMMER=1, AUTUMN=2, WINTER=3 };
 
-inline constexpr int BIOME_COUNT = 7;
+inline constexpr int BIOME_COUNT = 8;
 
 enum Biome { MEADOW=0, WETLAND=1, ALPINE=2, ALIEN=3, TROPICAL=4, DESERT=5,
-             CITY=6 };
+             CITY=6, OCEAN=7 };
+
 
 // ---- City terrain glyphs ----
 // The city is a biome like any other: the same water, weather and day/night
@@ -338,6 +339,11 @@ struct World {
   std::vector<std::pair<int,int>> springs;
   std::vector<Agent> agents;
 };
+
+// Open water at the map edge: island mode rings the world with sea, and the
+// OCEAN biome IS sea. Both want the edges topped up and the offshore cast
+// (ships, whale, serpent, seabirds) at work.
+inline bool hasOpenSea(const World& w) { return w.island || w.biome == OCEAN; }
 
 inline constexpr char FOAM_GLYPH = '=';
 inline constexpr char LILYPAD_GLYPH = 'l';

@@ -325,6 +325,13 @@ static inline uint8_t pickBiomeSpecies(Biome b, Rng& r){
       if(u<0.74f) return SPEC_ENGINEER;
       if(u<0.86f) return SPEC_SWARMER;
       return SPEC_WANDERER;
+    case OCEAN:
+      if(u<0.32f) return SPEC_SWARMER;
+      if(u<0.50f) return SPEC_MYSTIC;
+      if(u<0.64f) return SPEC_PACKHUNTER;
+      if(u<0.78f) return SPEC_PARASITE;
+      if(u<0.88f) return SPEC_SHELLBACK;
+      return SPEC_WANDERER;
     case CITY:  // pigeons, rats, cats, commuters — swarmers and opportunists
       if(u<0.30f) return SPEC_SWARMER;
       if(u<0.50f) return SPEC_TRICKSTER;
@@ -364,6 +371,7 @@ const char* biomeName(Biome b) {
     case TROPICAL: return "tropical";
     case DESERT: return "desert";
     case CITY:   return "city";
+    case OCEAN:  return "ocean";
   }
   return "meadow";
 }
@@ -403,6 +411,8 @@ BiomeWeights weightsFor(Biome b) {
       return {0.05f, 1.10f, 0.05f, 0.10f, 0.10f, 0.10f, 0.20f, 0.10f, 0.35f, 0.15f, 1.45f, 0.40f};
     case CITY:  // what grows here grows in parks and cracks — plus a harbour
       return {0.30f, 0.30f, 0.25f, 0.35f, 0.45f, 0.30f, 0.55f, 0.25f, 0.60f, 0.70f, 0.30f, 0.35f};
+    case OCEAN:  // only the atolls have anything growing on them
+      return {0.10f, 0.90f, 0.30f, 0.30f, 0.55f, 0.40f, 0.45f, 0.20f, 0.70f, 0.90f, 0.10f, 0.45f};
   }
   return weightsFor(MEADOW);
 }
@@ -628,6 +638,7 @@ static inline uint32_t biomeSalt(Biome b) {
     case TROPICAL: return 0x7A0F1u;
     case ALIEN:    return 0xA11E1u;
     case CITY:     return 0xC17F0u;
+    case OCEAN:    return 0x0CEA1u;
     default:       return 0xBEEFu;
   }
 }
@@ -1312,6 +1323,71 @@ w.biome = biome;
         else w.water[y][x] = (uint8_t)std::max<int>(w.water[y][x], 1);
       }
     }
+  } else if (biome == OCEAN) {
+    // Open sea. Island mode rings a landmass with water; this is the
+    // opposite — deep water everywhere, and whatever land there is has to
+    // earn it. The swell, surf, whale and serpent machinery already exists;
+    // this is the biome that is nothing but that.
+    for (int y=0; y<H; ++y) for (int x=0; x<W; ++x) {
+      // Depth from the noise field so the sea floor has trenches and banks.
+      int alt = (int)w.height[y][x];
+      int depth = std::clamp(7 - (alt - 90) / 26, 3, 7);
+      w.water[y][x] = (uint8_t)depth;
+      w.terrain[y][x] = '.';
+      w.height[y][x] = (uint8_t)std::clamp(40 + (alt - 90) / 3, 10, 90);
+    }
+    // Atolls: a handful of reef rings, most of them barely breaking the
+    // surface, one or two with a beach and a palm on it.
+    int atolls = 2 + r.i(0, 3);
+    for (int a=0; a<atolls; ++a) {
+      int cx = r.i(W/8, W-1-W/8), cy = r.i(H/8, H-1-H/8);
+      float rad = (float)std::min(W,H) * (0.08f + 0.09f * r.u01());
+      bool dry = !r.oneIn(3);           // most of them break the surface
+      uint32_t wob = hash3((uint32_t)cx, (uint32_t)cy, w.worldSeed);
+      for (int y=(int)(cy-rad-4); y<=(int)(cy+rad+4); ++y)
+        for (int x=(int)(cx-rad-4); x<=(int)(cx+rad+4); ++x) {
+          if (!inBounds(x,y)) continue;
+          float dx = (float)(x-cx), dy = (float)(y-cy);
+          float dist = std::sqrt(dx*dx + dy*dy);
+          float ang = std::atan2(dy, dx);
+          float rw = rad * (1.f + 0.20f * std::sin(ang*3.f + (float)(wob & 63u)) +
+                                  0.12f * std::sin(ang*7.f + (float)((wob>>6) & 63u)));
+          if (dist > rw) continue;
+          float tt = dist / std::max(1.f, rw);   // 0 centre .. 1 rim
+          if (tt > 0.66f) {                       // the reef rim
+            w.water[y][x] = (uint8_t)(dry && tt > 0.78f ? 0 : (tt > 0.82f ? 1 : 2));
+            w.height[y][x] = (uint8_t)(dry ? 150 : 120);
+            if (w.water[y][x] == 0) w.terrain[y][x] = r.oneIn(4) ? '.' : 's';
+            else if (r.oneIn(4)) w.terrain[y][x] = 'C';
+          } else if (tt > 0.55f) {                // the lagoon shelf
+            w.water[y][x] = 2;
+            w.height[y][x] = 110;
+            if (r.oneIn(7)) w.terrain[y][x] = 'C';
+          } else {                                // the lagoon itself
+            w.water[y][x] = 3;
+            w.height[y][x] = 100;
+          }
+        }
+      // Sea stacks: bare rock standing out of the water beside the reef.
+      if (r.oneIn(2)) {
+        int sx = cx + r.i(-(int)rad, (int)rad), sy = cy + r.i(-(int)rad, (int)rad);
+        if (inBounds(sx, sy)) {
+          w.water[sy][sx] = 0;
+          w.height[sy][sx] = 200;
+          w.terrain[sy][sx] = 'B';
+          if (inBounds(sx+1, sy)) {
+            w.water[sy][sx+1] = 0; w.height[sy][sx+1] = 190;
+            w.terrain[sy][sx+1] = '^';
+          }
+        }
+      }
+    }
+    // Kelp forests in the shallows around the atolls.
+    for (int k=0; k < (W*H)/220; ++k) {
+      int x = r.i(0, W-1), y = r.i(0, H-1);
+      if (w.water[y][x] >= 1 && w.water[y][x] <= 3 && r.oneIn(2))
+        w.terrain[y][x] = KELP_GLYPH;
+    }
   } else if (biome == CITY) {
     seedCity(w, r);
   } else if (biome == TROPICAL) {
@@ -1330,7 +1406,8 @@ w.biome = biome;
 
   int basePonds = std::max(4, (W * H) / 9000);
   int ponds = std::max(2, (int)(basePonds * w.bw.pondDensity));
-  if (biome == CITY) ponds = 0;  // the harbour is the water here
+  if (biome == CITY) ponds = 0;   // the harbour is the water here
+  if (biome == OCEAN) ponds = 0;  // it is already all water
   for (int p=0; p<ponds; ++p) {
     int marginX = std::max(12, W/18);
     int marginY = std::max(8,  H/18);
@@ -1553,6 +1630,7 @@ for (int y=0;y<H;++y) for (int x=0;x<W;++x) {
     if (biome==ALPINE)  springCount = 1;
     if (biome==TROPICAL) springCount = 2;
     if (biome==ALIEN)   springCount = 2;
+    if (biome==OCEAN) springCount = 0;
     if (biome==CITY) {
       // The tide keeps the harbour full; a spring hunting for a low basin
       // would sink a pond into the middle of downtown instead.
@@ -1696,6 +1774,7 @@ static float biomeWetTarget(Biome b) {
     case DESERT:   return 0.08f;
     case ALPINE:   return 0.18f;
     case CITY:     return 0.26f;  // the harbour, and it stays a harbour
+    case OCEAN:    return 0.93f;  // it is the sea
     default:       return 0.22f;  // meadow
   }
 }
@@ -1705,7 +1784,7 @@ static void stepWater(World& w, Rng& r) {
 
   // Island mode: the map edge is open sea — keep it topped up so the
   // ocean ring never drains away.
-  if (w.island) {
+  if (hasOpenSea(w)) {
     for (int x=0; x<W; ++x) {
       if (next[0][x] > 0)   next[0][x]   = std::max<uint8_t>(next[0][x], 5);
       if (next[H-1][x] > 0) next[H-1][x] = std::max<uint8_t>(next[H-1][x], 5);
@@ -1721,6 +1800,7 @@ static void stepWater(World& w, Rng& r) {
   // guarantee an equilibrium instead of hoping the tuning balances).
   const float wetOver = wetFraction(w) -
       (biomeWetTarget(w.biome) + (w.island ? 0.30f : 0.f));
+
 
   // Persistent springs: keep rivers/lakes alive long-term.
   if (!w.springs.empty()) {

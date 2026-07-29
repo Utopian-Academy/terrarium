@@ -325,6 +325,101 @@ inline bool pixelviewSameBuilding(const World& w, int x, int y, int nx, int ny) 
   return w.height[ny][nx] == w.height[y][x];
 }
 
+// ---------------------------------------------------------------------
+// Biome identity
+// ---------------------------------------------------------------------
+// The plant glyphs are shared, so for a long time meadow, wetland, alpine
+// and tropical differed only in how MUCH of each grew — four variations on
+// one green. Each terrestrial biome now grades its own land: a whole-palette
+// tint applied after the per-glyph colour, which keeps the plant families
+// while making the biome recognisable from across the room.
+//
+// (ALIEN and CITY don't come through here — they replace the palette
+// outright.)
+inline void pixelviewBiomeGrade(Biome bi, int& r, int& g, int& b) {
+  float fr = (float)r, fg = (float)g, fb = (float)b;
+  switch (bi) {
+    case MEADOW:
+      // Sunlit hay: warm yellow-greens, the blue pulled right out.
+      fr *= 1.12f; fg *= 1.08f; fb *= 0.76f;
+      fr += 8.f; fg += 7.f;
+      break;
+    case WETLAND:
+      // Peat and shade: deep blue-greens, everything a stop darker.
+      fr *= 0.76f; fg *= 0.98f; fb *= 1.12f;
+      fb += 10.f; fg += 4.f;
+      break;
+    case ALPINE: {
+      // Thin air: sage and lichen, desaturated toward blue-grey rock.
+      float grey = 0.30f * fr + 0.59f * fg + 0.11f * fb;
+      fr = fr * 0.58f + grey * 0.42f;
+      fg = fg * 0.62f + grey * 0.38f;
+      fb = fb * 0.58f + grey * 0.42f;
+      fr *= 0.94f; fb *= 1.14f;
+      fb += 12.f;
+      break;
+    }
+    case TROPICAL:
+      // Rainforest: saturated jade, dark under the canopy.
+      fr *= 0.78f; fg *= 1.12f; fb *= 0.88f;
+      fg += 6.f;
+      break;
+    case DESERT:
+      // Everything bakes: ochre and rose, greens only in the cactus.
+      fr *= 1.10f; fg *= 1.00f; fb *= 0.78f;
+      fr += 8.f; fg += 3.f;
+      break;
+    default:
+      return;
+  }
+  r = (int)fr; g = (int)fg; b = (int)fb;
+}
+
+// Bare ground differs as much as the planting does: pale tan under a meadow,
+// black peat in a bog, grey scree on a mountain.
+inline void pixelviewBiomeSoil(Biome bi, int j, int& r, int& g, int& b) {
+  switch (bi) {
+    case MEADOW:   r = 68 + j / 2; g = 64 + j / 2; b = 42; break;  // dry olive
+    case WETLAND:  r = 48 + j / 2; g = 46 + j / 2; b = 38; break;  // peat
+    case ALPINE:   r = 92 + j / 2; g = 96 + j / 2; b = 104; break; // scree
+    case TROPICAL: r = 52 + j / 2; g = 40 + j / 2; b = 30; break;  // dark loam
+    case DESERT:   r = 178 + j / 2; g = 148 + j / 2; b = 104; break;
+    default:       r = 26 + j / 2; g = 22 + j / 2; b = 18; break;
+  }
+}
+
+// ...and so does the water. One blue ramp served every biome; a tannin bog,
+// a glacial tarn and a coral shallow are not the same colour of water.
+inline void pixelviewBiomeWater(Biome bi, int depth, float& fr, float& fg,
+                                float& fb) {
+  switch (bi) {
+    case WETLAND: {   // tannin: brown-green, and you cannot see into it
+      float t = 0.72f;
+      fr = fr * (1.f - t) + (44.f + 5.f * (float)depth) * t;
+      fg = fg * (1.f - t) + (62.f + 3.f * (float)depth) * t;
+      fb = fb * (1.f - t) + (40.f + 2.f * (float)depth) * t;
+      break;
+    }
+    case ALPINE:      // glacial: pale milky cyan in the shallows
+      fr *= 0.92f; fg *= 1.14f; fb *= 1.10f;
+      fr += 18.f; fg += 26.f; fb += 14.f;
+      break;
+    case TROPICAL:    // reef turquoise
+      fr *= 0.80f; fg *= 1.20f; fb *= 1.06f;
+      fg += 14.f;
+      break;
+    case DESERT:      // an oasis is jade, not ocean
+      fr *= 0.90f; fg *= 1.16f; fb *= 0.86f;
+      fg += 10.f;
+      break;
+    case MEADOW:      // a clear pond takes the sky
+      fg += 6.f; fb += 10.f;
+      break;
+    default:
+      break;
+  }
+}
+
 // Nearest-neighbour cloud sample (the full app does bilinear; not needed at
 // 1px/cell).
 inline uint8_t pixelviewCloudAt(const World& w, int x, int y) {
@@ -393,6 +488,11 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
     r = 10 + sh * 4 + j / 2;
     g = 56 + sh * 14 + j;
     b = 118 + sh * 15 + j;
+    {  // each biome's water is its own colour, before any motion is added
+      float fr2 = (float)r, fg2 = (float)g, fb2 = (float)b;
+      pixelviewBiomeWater(w.biome, dd, fr2, fg2, fb2);
+      r = (int)fr2; g = (int)fg2; b = (int)fb2;
+    }
     // sparse foam shimmer
     if (((h >> 4) + (uint32_t)(tick / 6)) % 97u == 0u) { r = g = b = 235; }
 
@@ -638,10 +738,17 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
       case 'c': r = 90; g = 170 + j; b = 100; break;
       default:
         if (displayBgMode() == 1) { r = g = b = 0; }             // oled: true black
-        else { r = 26 + j / 2; g = 22 + j / 2; b = 18; }         // earth
+        else pixelviewBiomeSoil(w.biome, j, r, g, b);            // earth
         break;
     }
     if (t == KELP_GLYPH) { r = 24; g = 140 + j; b = 110; }
+    // Whole-palette biome grade over the foliage, soil and rock. The
+    // accents stay true: the wildflower distribution and the fly-agaric caps
+    // are chosen colours, and grading them turned white petals yellow and
+    // every desert bloom orange.
+    bool accent = (t == 'f' || t == '+' || t == '&' || t == '!' || t == 'm' ||
+                   t == '$' || t == '*' || t == 'V' || t == 'C');
+    if (!accent && w.biome != CITY) pixelviewBiomeGrade(w.biome, r, g, b);
   }
 
   // The alien world is not Earth with odd colours: its whole biology is
@@ -1245,10 +1352,11 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
     }
   }
 
-  // Island cast: the ship on her endless circuit (lantern-lit at night),
+  // Offshore cast: the ship on her endless circuit (lantern-lit at night),
   // seabirds skimming the shore by day, an occasional whale, and — rarely
-  // — the serpent's humps arcing through the deep.
-  if (w.island) {
+  // — the serpent's humps arcing through the deep. Island mode and the open
+  // OCEAN biome both get it.
+  if (hasOpenSea(w)) {
     PixelviewCast& C = pixelviewCast(animT);
     float br = displayBrightness();
     float fx = (float)x, fy = (float)y;

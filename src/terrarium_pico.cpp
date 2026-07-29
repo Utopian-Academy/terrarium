@@ -65,6 +65,7 @@ PicoOptions parseArgs(int argc, char** argv) {
       else if (b == "tropical") o.biome = TROPICAL;
       else if (b == "desert") o.biome = DESERT;
       else if (b == "city") o.biome = CITY;
+      else if (b == "ocean") o.biome = OCEAN;
     } else if (a == "--scale") {
       o.scale = std::clamp(std::atoi(next()), 1, 8);
     } else if (a == "--tps") {
@@ -315,6 +316,7 @@ int main(int argc, char** argv) {
           {MEADOW, false},  {WETLAND, false},  {ALPINE, false},
           {ALIEN, false},   {TROPICAL, false}, {DESERT, false},
           {CITY, false},     // a harbour city
+          {OCEAN, false},    // the open sea
           {TROPICAL, true},  // a new island
       };
       constexpr int kStops = (int)(sizeof(stops) / sizeof(stops[0]));
