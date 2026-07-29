@@ -152,6 +152,179 @@ inline PixelviewCast& pixelviewCast(float animT) {
   return C;
 }
 
+// ---------------------------------------------------------------------
+// City
+// ---------------------------------------------------------------------
+
+// Where the harbour is, and which way it runs. Derived once per world from
+// the water itself (second moments -> principal axis) so the boats know
+// where to sail without the renderer being told anything about worldgen.
+struct CityHarbour {
+  uint32_t seed = 0xFFFFFFFFu;
+  bool valid = false;
+  float cx = 0.f, cy = 0.f;    // centroid of the water
+  float ax = 1.f, ay = 0.f;    // long axis, unit
+  float halfLen = 0.f;         // extent along the long axis
+  float halfWid = 0.f;
+  int berthN = 0;              // moorings along the quays
+  float berthX[6] = {0}, berthY[6] = {0};
+};
+
+inline const CityHarbour& pixelviewHarbour(const World& w) {
+  // Two slots: a voyage crosses from one world to the next, and both are
+  // rendered on the same frame.
+  static CityHarbour slot[2];
+  static int next = 0;
+  for (int i = 0; i < 2; ++i)
+    if (slot[i].seed == w.worldSeed) return slot[i];
+
+  CityHarbour h;
+  h.seed = w.worldSeed;
+  double sx = 0, sy = 0, n = 0;
+  for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x)
+    if (w.water[y][x] >= 3) { sx += x; sy += y; n += 1; }
+  if (n > 40) {
+    h.valid = true;
+    h.cx = (float)(sx / n); h.cy = (float)(sy / n);
+    double mxx = 0, myy = 0, mxy = 0;
+    for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) {
+      if (w.water[y][x] < 3) continue;
+      double dx = x - h.cx, dy = y - h.cy;
+      mxx += dx * dx; myy += dy * dy; mxy += dx * dy;
+    }
+    mxx /= n; myy /= n; mxy /= n;
+    double th = 0.5 * std::atan2(2.0 * mxy, mxx - myy);
+    h.ax = (float)std::cos(th); h.ay = (float)std::sin(th);
+    double e1 = 0.5 * (mxx + myy) + 0.5 * std::sqrt((mxx - myy) * (mxx - myy) + 4 * mxy * mxy);
+    double e2 = 0.5 * (mxx + myy) - 0.5 * std::sqrt((mxx - myy) * (mxx - myy) + 4 * mxy * mxy);
+    h.halfLen = (float)(2.0 * std::sqrt(std::max(1.0, e1)));
+    h.halfWid = (float)(2.0 * std::sqrt(std::max(1.0, e2)));
+    // Moorings: deep-ish water that still has a quay within reach.
+    for (int tries = 0; tries < 4000 && h.berthN < 6; ++tries) {
+      uint32_t q = hash3((uint32_t)tries, w.worldSeed, 0xB0A7u);
+      int x = (int)(q % (uint32_t)W), y = (int)((q >> 11) % (uint32_t)H);
+      if (w.water[y][x] < 2 || w.water[y][x] > 4) continue;
+      bool nearQuay = false;
+      for (int oy = -2; oy <= 2 && !nearQuay; ++oy)
+        for (int ox = -2; ox <= 2; ++ox) {
+          int nx = x + ox, ny = y + oy;
+          if (inBounds(nx, ny) && w.water[ny][nx] == 0) { nearQuay = true; break; }
+        }
+      if (!nearQuay) continue;
+      bool tooClose = false;
+      for (int i = 0; i < h.berthN; ++i) {
+        float dx = h.berthX[i] - (float)x, dy = h.berthY[i] - (float)y;
+        if (dx * dx + dy * dy < 100.f) { tooClose = true; break; }
+      }
+      if (tooClose) continue;
+      h.berthX[h.berthN] = (float)x; h.berthY[h.berthN] = (float)y;
+      ++h.berthN;
+    }
+  }
+  slot[next] = h;
+  next ^= 1;
+  return slot[next ^ 1];
+}
+
+// The harbour traffic, positioned once per frame: a ferry working her route,
+// an occasional freighter standing in or out, and the moored boats nodding
+// at their berths.
+struct CityBoats {
+  float t = -1e9f;
+  uint32_t seed = 0;
+  bool ferryUp = false;
+  float ferX = 0, ferY = 0, ferDx = 1, ferDy = 0;
+  bool shipUp = false;
+  float shpX = 0, shpY = 0, shpDx = 1, shpDy = 0;
+  int mooredN = 0;
+  float mooX[6] = {0}, mooY[6] = {0};
+};
+
+inline const CityBoats& pixelviewCityBoats(const World& w, float animT) {
+  static CityBoats B;
+  const CityHarbour& h = pixelviewHarbour(w);
+  if (B.t == animT && B.seed == w.worldSeed) return B;
+  B.t = animT; B.seed = w.worldSeed;
+  B.ferryUp = B.shipUp = false; B.mooredN = 0;
+  if (!h.valid) return B;
+
+  // Ferry: a shuttle up and down the harbour, turning at each end.
+  {
+    const float period = 84.f;
+    float ph = std::fmod(animT, period) / period;      // 0..1
+    float tri = (ph < 0.5f) ? (ph * 2.f) : (2.f - ph * 2.f);   // 0..1..0
+    float dir = (ph < 0.5f) ? 1.f : -1.f;
+    float s = (tri * 2.f - 1.f) * h.halfLen * 0.86f;
+    float cross = 0.35f * h.halfWid * std::sin(animT * 0.05f);
+    B.ferX = h.cx + h.ax * s - h.ay * cross;
+    B.ferY = h.cy + h.ay * s + h.ax * cross;
+    B.ferDx = h.ax * dir; B.ferDy = h.ay * dir;
+    B.ferryUp = true;
+  }
+  // Freighter: in on one epoch, gone the next.
+  {
+    uint32_t ep = (uint32_t)(animT / 200.f);
+    uint32_t hh = hash3(ep, w.worldSeed, 0x5417u);
+    float age = animT - (float)ep * 200.f;
+    if ((hh % 3u) == 0u && age < 150.f) {
+      float dir = (hh & 0x10000u) ? 1.f : -1.f;
+      float s = (age / 150.f * 2.f - 1.f) * h.halfLen * 1.25f * dir;
+      float cross = ((float)((hh >> 4) & 255u) / 255.f - 0.5f) * h.halfWid * 0.7f;
+      B.shpX = h.cx + h.ax * s - h.ay * cross;
+      B.shpY = h.cy + h.ay * s + h.ax * cross;
+      B.shpDx = h.ax * dir; B.shpDy = h.ay * dir;
+      B.shipUp = true;
+    }
+  }
+  // Moored boats nod on the swell.
+  for (int i = 0; i < h.berthN; ++i) {
+    float bob = 0.45f * std::sin(animT * 0.9f + (float)i * 1.7f);
+    B.mooX[i] = h.berthX[i] + bob * 0.4f;
+    B.mooY[i] = h.berthY[i] + bob;
+    ++B.mooredN;
+  }
+  return B;
+}
+
+// Roof palette. Seen from above a city is roofs, not facades: tar and
+// gravel, painted membrane, rusted steel, weathered copper — with the pastel
+// plaster only showing on the parapets that catch the light.
+inline void pixelviewCityRoof(uint32_t fam, int storeys, int& r, int& g, int& b) {
+  // Painted metal, mostly — the blue and green roofs you see over any
+  // Japanese city, with terracotta and mustard between them and only the
+  // occasional stretch of plain tar. The city has to carry colour by day,
+  // when the neon is off.
+  switch (fam % 14u) {
+    case 0:  r = 48;  g = 122; b = 178; break;  // cobalt metal
+    case 1:  r = 40;  g = 148; b = 132; break;  // sea green metal
+    case 2:  r = 196; g = 92;  b = 62;  break;  // terracotta
+    case 3:  r = 214; g = 168; b = 58;  break;  // mustard
+    case 4:  r = 72;  g = 96;  b = 168; break;  // deep blue
+    case 5:  r = 226; g = 118; b = 132; break;  // coral
+    case 6:  r = 232; g = 158; b = 120; break;  // peach membrane
+    case 7:  r = 238; g = 212; b = 176; break;  // cream
+    case 8:  r = 84;  g = 80;  b = 88;  break;  // tar
+    case 9:  r = 158; g = 74;  b = 130; break;  // plum
+    case 10: r = 96;  g = 186; b = 196; break;  // pale teal
+    case 11: r = 190; g = 150; b = 108; break;  // sand
+    case 12: r = 130; g = 128; b = 136; break;  // galvanised
+    default: r = 208; g = 96;  b = 88;  break;  // red oxide
+  }
+  // Tall stock reads cooler and more mechanical, but never goes grey.
+  float t = std::min(1.f, (float)storeys / 26.f) * 0.38f;
+  r = (int)(r * (1.f - t) + 120 * t);
+  g = (int)(g * (1.f - t) + 138 * t);
+  b = (int)(b * (1.f - t) + 160 * t);
+}
+
+// Is this cell part of the same building as its neighbour? Buildings are
+// uniform in height, which is what lets the renderer find their outlines.
+inline bool pixelviewSameBuilding(const World& w, int x, int y, int nx, int ny) {
+  if (!inBounds(nx, ny)) return false;
+  if (!isCityBuilding(w.terrain[ny][nx])) return false;
+  return w.height[ny][nx] == w.height[y][x];
+}
+
 // Nearest-neighbour cloud sample (the full app does bilinear; not needed at
 // 1px/cell).
 inline uint8_t pixelviewCloudAt(const World& w, int x, int y) {
@@ -393,6 +566,67 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
           }
         }
         break;
+      // ---- City ----
+      case CITY_ROAD: {
+        r = 34 + j / 2; g = 36 + j / 2; b = 46 + j / 2;
+        // Wet asphalt goes darker and glossier when it rains.
+        float wet = w.weather.rainStrength;
+        if (wet > 0.02f) {
+          r = (int)(r * (1.f - 0.30f * wet)); g = (int)(g * (1.f - 0.30f * wet));
+          b = (int)(b * (1.f - 0.18f * wet));
+        }
+        break;
+      }
+      case CITY_WALK:  r = 78 + j; g = 76 + j; b = 84 + j; break;
+      case CITY_QUAY:  r = 96 + j; g = 90 + j; b = 82 + j; break;
+      case CITY_BRIDGE:r = 112 + j; g = 106 + j; b = 116 + j; break;
+      case CITY_LOT:   r = 62 + j; g = 57 + j; b = 50 + j; break;
+      case CITY_LOW: case CITY_MID: case CITY_TOWER: case CITY_GLASS: {
+        int storeys = std::max(0, ((int)w.height[y][x] - CITY_BASE_H) / CITY_STOREY);
+        // One family per building, keyed off height ALONE: every cell of a
+        // building shares its height, and worldgen gives each lot its own
+        // storey count. (Mixing a coarse position into this key split single
+        // roofs across two colours — the city came out as confetti.)
+        uint32_t famh = hash3((uint32_t)w.height[y][x], w.worldSeed, 0x0F00Fu);
+        if (t == CITY_GLASS) {   // a glazed atrium roof, banded by its bays
+          float band = 0.5f + 0.5f * std::sin((float)(x + y) * 1.9f);
+          r = 92 + (int)(30 * band); g = 118 + (int)(34 * band);
+          b = 140 + (int)(38 * band);
+        } else {
+          pixelviewCityRoof(famh, storeys, r, g, b);
+        }
+        r += j / 2; g += j / 2; b += j / 2;
+
+        // Parapet: the lip of the roof catches the light, which is what
+        // gives a block its outline from above.
+        bool edge = !pixelviewSameBuilding(w, x, y, x - 1, y) ||
+                    !pixelviewSameBuilding(w, x, y, x + 1, y) ||
+                    !pixelviewSameBuilding(w, x, y, x, y - 1) ||
+                    !pixelviewSameBuilding(w, x, y, x, y + 1);
+        if (edge) { r += 42; g += 40; b += 38; }
+
+        // Rooftop plant: tanks, ducts, stair heads, the odd garden or pad.
+        uint32_t rh = hash3((uint32_t)x, (uint32_t)y, famh ^ 0x0F007u);
+        uint32_t kind = rh % 100u;
+        if (!edge) {   // sparse: plant should punctuate a roof, not pepper it
+          if (kind < 4u) { r = 118; g = 112; b = 104; }          // AC plant
+          else if (kind < 6u) { r = 96; g = 72; b = 52; }        // water tank
+          else if (kind < 8u && storeys >= 4) { r = 150; g = 150; b = 156; }   // stair head
+          else if (kind < 11u && storeys <= 6) { r = 62; g = 116; b = 64; }    // roof garden
+        }
+        break;
+      }
+      case CITY_NEON: {
+        // The sign's own colour; the glow is added after the light grade.
+        switch ((h >> 7) % 5u) {
+          case 0:  r = 236; g = 60;  b = 150; break;  // magenta
+          case 1:  r = 70;  g = 220; b = 226; break;  // cyan
+          case 2:  r = 255; g = 156; b = 60;  break;  // amber
+          case 3:  r = 150; g = 240; b = 110; break;  // lime
+          default: r = 240; g = 84;  b = 80;  break;  // red
+        }
+        break;
+      }
       case 'V': r = 46; g = 38 + j / 2; b = 40; break;  // basalt vent
       case '$': r = 220; g = 190 + j; b = 90; break;
       case 'd': case 'e': case 'g': r = 105 + j; g = 70; b = 44; break;
@@ -408,6 +642,75 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
         break;
     }
     if (t == KELP_GLYPH) { r = 24; g = 140 + j; b = 110; }
+  }
+
+  // The alien world is not Earth with odd colours: its whole biology is
+  // bioluminescent, so the ground itself carries slow chromatic tides and
+  // the flora glows in daylight instead of merely reflecting it. This
+  // overrides the terrestrial hue bands wholesale for ALIEN.
+  if (tintable && w.biome == ALIEN) {
+    // Chromatic tide: a slow wave crossing the world, so the palette drifts
+    // through violet, teal and chartreuse rather than sitting still.
+    float tide = std::sin((float)x * 0.045f + (float)y * 0.031f + animT * 0.11f);
+    float tide2 = std::sin((float)x * 0.017f - (float)y * 0.023f - animT * 0.07f);
+    float shift = 0.5f + 0.5f * tide;
+    uint32_t fam = (h >> 6) & 3u;
+    switch (t) {
+      case ',': case '"': case ';': case ':': {   // filament turf
+        r = 26 + (int)(38.f * shift) + j;
+        g = 88 + (int)(52.f * (1.f - shift)) + j;
+        b = 96 + (int)(58.f * shift);
+        if (fam == 0) { r += 20; b += 18; }        // violet strain
+        break;
+      }
+      case '#': {                                  // bladder-shrub
+        r = 62 + (int)(48.f * shift) + j;
+        g = 42 + (int)(36.f * (1.f - shift));
+        b = 104 + (int)(42.f * shift);
+        break;
+      }
+      case 'T': case 'Y': case 'P': {              // spires, cyan at the tips
+        r = 38 + (int)(30.f * shift);
+        g = 28 + (int)(72.f * (0.35f + 0.65f * (1.f - shift))) + j;
+        b = 92 + (int)(62.f * shift);
+        break;
+      }
+      case 'm': {                                  // glow pods
+        float pulse = 0.55f + 0.45f * std::sin(animT * 1.9f + (float)(h & 31u));
+        r = (int)(70.f + 120.f * pulse);
+        g = (int)(210.f + 40.f * pulse);
+        b = (int)(180.f + 60.f * pulse);
+        break;
+      }
+      case 'f': case '+': case '&': case '!': {    // luminous blooms
+        float pulse = 0.5f + 0.5f * std::sin(animT * 1.3f + (float)(h & 63u));
+        switch ((h >> 5) % 4u) {
+          case 0:  r = (int)(90 + 90 * pulse);  g = 250; b = 230; break;  // cyan
+          case 1:  r = 240; g = (int)(70 + 60 * pulse);  b = 250; break;  // magenta
+          case 2:  r = (int)(180 + 60 * pulse); g = 255; b = 90;  break;  // chartreuse
+          default: r = 150; g = (int)(120 + 90 * pulse); b = 255; break;  // violet
+        }
+        break;
+      }
+      case '$': r = 250; g = 230; b = 120; break;  // amber sap
+      case 'c': r = 90;  g = 230; b = 190; break;
+      case 'd': case 'e': case 'g':                // regolith / flesh ground
+        r = 74 + (int)(20.f * tide2) + j / 2;
+        g = 52 + (int)(16.f * tide) + j / 2;
+        b = 86 + (int)(26.f * tide2);
+        break;
+      case '^': case 'B': r = 104; g = 96; b = 128; break;
+      case 'M': r = 150; g = 140; b = 178; break;
+      case 's': r = 168; g = 150; b = 190; break;
+      case '.': default:
+        if (displayBgMode() == 1) { r = g = b = 0; }
+        else {
+          r = 34 + (int)(14.f * tide2) + j / 2;
+          g = 24 + j / 2;
+          b = 44 + (int)(18.f * tide) + j / 2;
+        }
+        break;
+    }
   }
 
   // Depth when the world fills in: once vegetation covers everything the
@@ -446,11 +749,22 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
       // Snow settles on open ground and grass; trees and shrubs just take
       // the frost tint above (snowy pine forest, not white-out).
       bool ground = (t == ',' || t == '"' || t == ';' || t == '.' ||
-                     t == ':' || t == 's');
+                     t == ':' || t == 's' ||
+                     isCityPaved(t) || t == CITY_LOT);  // snow lies on streets
       if (ground) {
         uint32_t sh = hash3((uint32_t)x, (uint32_t)y, 0x534E4F57u);
         float cover = 0.10f + 0.22f * seasonLerp(tick);
         if ((float)(sh & 1023u) / 1023.0f < cover) { r = 226; g = 232; b = 244; }
+      }
+      // Roofs take snow too, but blended: a hard white speckle over the
+      // city's painted metal read as static rather than settled snow.
+      if (w.biome == CITY && isCityBuilding(t)) {
+        uint32_t sh = hash3((uint32_t)x, (uint32_t)y, 0x524F4F46u);
+        float lay = (0.35f + 0.45f * seasonLerp(tick)) *
+                    (0.55f + 0.45f * (float)(sh & 255u) / 255.f);
+        r = (int)(r + (232 - r) * lay);
+        g = (int)(g + (238 - g) * lay);
+        b = (int)(b + (248 - b) * lay);
       }
     }
   }
@@ -470,6 +784,270 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
     uint32_t fh = hash3((uint32_t)x, (uint32_t)y, 0xF12EF1u ^ w.worldSeed);
     float p = pixelviewMote(fh, animT, 6.0f, 1600u, 2.0f) * displayBrightness();
     rr += 200.f * p; gg += 215.f * p; bb += 90.f * p;
+  }
+
+  // ---- The city after dark (and its traffic, which never stops) ----
+  if (w.biome == CITY) {
+    const float br = displayBrightness();
+    const float night = std::clamp(1.0f - dl.level / 0.60f, 0.0f, 1.0f);
+    const float fx = (float)x, fy = (float)y;
+
+    // Shadows. From above, a city is legible because its towers lie across
+    // everything north-west of them — this is what puts the skyline into a
+    // top-down view at all.
+    if (dl.level > 0.20f) {
+      int hHere = (int)w.height[y][x];
+      float dark = 0.f;
+      for (int k = 1; k <= 4; ++k) {
+        int nx = x - k, ny = y - k;
+        if (!inBounds(nx, ny)) break;
+        if (!isCityBuilding(w.terrain[ny][nx])) continue;
+        int over = (int)w.height[ny][nx] - hHere;
+        if (over <= 0) continue;
+        // A storey throws about a cell of shadow at this sun angle.
+        float reach = (float)over / (float)CITY_STOREY;
+        if (reach >= (float)k)
+          dark = std::max(dark, 0.42f * (1.f - (float)(k - 1) * 0.18f));
+      }
+      if (dark > 0.f) {
+        float f = dark * dl.level;
+        rr *= (1.f - f); gg *= (1.f - f * 0.94f); bb *= (1.f - f * 0.82f);
+      }
+    }
+
+    // Golden hour over a harbour city: the whole thing goes rose.
+    if (dl.warm > 0.f) {
+      float ww = dl.warm * br;
+      rr += 34.f * ww; gg += 9.f * ww; bb += 20.f * ww;
+    }
+
+    // Lit windows: each cell is a floor's worth of glass that switches on
+    // its own slow clock, so the towers shimmer instead of strobing.
+    if (isCityBuilding(t) && night > 0.02f) {
+      uint32_t wh = hash3((uint32_t)x, (uint32_t)y, 0x5711DEu ^ w.worldSeed);
+      float lifeSec = 50.f + (float)(wh % 120u);
+      uint32_t ep = (uint32_t)(animT / lifeSec + (float)(wh % 977u) * 0.0011f);
+      uint32_t st = hash3(wh, ep * 2654435761u, 0x1417u);
+      float density = (t == CITY_LOW) ? 0.26f
+                    : (t == CITY_GLASS) ? 0.30f : 0.38f;
+      density *= 0.45f + 0.55f * night;     // the offices empty overnight
+      // Occupancy per building (height keys a building, as with its roof):
+      // some blocks blaze, some are dark for the night. Uniform density made
+      // every tower an identical smear of scattered lights.
+      uint32_t bh = hash3((uint32_t)w.height[y][x], w.worldSeed, 0x0CC0u);
+      density *= 0.20f + 1.35f * (float)(bh & 255u) / 255.f;
+      // The perimeter is where the windows are; a roof is mostly roof.
+      bool onEdge = !pixelviewSameBuilding(w, x, y, x - 1, y) ||
+                    !pixelviewSameBuilding(w, x, y, x + 1, y) ||
+                    !pixelviewSameBuilding(w, x, y, x, y - 1) ||
+                    !pixelviewSameBuilding(w, x, y, x, y + 1);
+      density *= onEdge ? 1.6f : 0.35f;
+      if ((float)(st & 1023u) / 1023.f < density) {
+        float p = night * br;
+        switch ((st >> 12) % 8u) {
+          case 0:  rr += 120.f * p; gg += 170.f * p; bb += 235.f * p; break;  // a TV
+          case 1:  rr += 235.f * p; gg += 232.f * p; bb += 215.f * p; break;  // office white
+          default: rr += 245.f * p; gg += 205.f * p; bb += 140.f * p; break;  // lamplight
+        }
+      }
+    }
+
+    // Signage, street lamps and their spill. One 3x3 pass gathers both.
+    if (night > 0.02f && (isCityPaved(t) || isCityBuilding(t) ||
+                          t == CITY_NEON || t == CITY_LOT)) {
+      float glowR = 0.f, glowG = 0.f, glowB = 0.f;
+      for (int oy = -1; oy <= 1; ++oy) for (int ox = -1; ox <= 1; ++ox) {
+        int nx = x + ox, ny = y + oy;
+        if (!inBounds(nx, ny)) continue;
+        char n = w.terrain[ny][nx];
+        bool self = (ox == 0 && oy == 0);
+        float fall = self ? 1.0f : (ox && oy ? 0.28f : 0.42f);
+        if (n == CITY_NEON) {
+          uint32_t nh = hash3((uint32_t)nx, (uint32_t)ny, w.worldSeed);
+          float pulse = 0.72f + 0.28f * std::sin(animT * (1.1f + (float)(nh & 7u) * 0.3f) +
+                                                 (float)(nh & 63u));
+          // A tube on the blink: rare, brief, and it comes back.
+          if (((nh >> 9) % 7u) == 0u &&
+              std::sin(animT * 6.0f + (float)(nh & 31u)) > 0.93f) pulse *= 0.25f;
+          float a = pulse * fall * night;
+          switch ((nh >> 7) % 5u) {
+            case 0:  glowR += 236.f * a; glowG += 60.f * a;  glowB += 150.f * a; break;
+            case 1:  glowR += 70.f * a;  glowG += 220.f * a; glowB += 226.f * a; break;
+            case 2:  glowR += 255.f * a; glowG += 156.f * a; glowB += 60.f * a;  break;
+            case 3:  glowR += 150.f * a; glowG += 240.f * a; glowB += 110.f * a; break;
+            default: glowR += 240.f * a; glowG += 84.f * a;  glowB += 80.f * a;  break;
+          }
+        } else if (n == CITY_WALK || n == CITY_BRIDGE) {
+          // Street lamps at regular intervals along the pavement.
+          if ((hash3((uint32_t)nx, (uint32_t)ny, 0x1A47Fu) % 19u) == 0u) {
+            float a = fall * night * (0.85f + 0.15f * std::sin(animT * 0.7f + (float)nx));
+            glowR += 210.f * a; glowG += 160.f * a; glowB += 85.f * a;
+          }
+        }
+      }
+      rr += glowR * 0.80f * br; gg += glowG * 0.80f * br; bb += glowB * 0.80f * br;
+    }
+
+    // Aviation lights: a slow red blink on the tallest towers.
+    if (isCityBuilding(t) && night > 0.15f &&
+        (int)w.height[y][x] >= CITY_BASE_H + 20 * CITY_STOREY) {
+      uint32_t ah = hash3((uint32_t)w.height[y][x], w.worldSeed, 0xA71Au);
+      if ((hash3((uint32_t)x, (uint32_t)y, ah) % 23u) == 0u) {
+        float blink = std::sin(animT * 1.7f + (float)(ah & 63u));
+        if (blink > 0.55f) {
+          float p = night * br * (blink - 0.55f) / 0.45f;
+          rr += 235.f * p; gg += 40.f * p; bb += 30.f * p;
+        }
+      }
+    }
+
+    // Traffic. Lanes alternate direction, each with its own spacing and
+    // speed, so the streams read as flow rather than a marching pattern.
+    if (t == CITY_ROAD || t == CITY_BRIDGE) {
+      bool horiz = (x > 0 && (w.terrain[y][x-1] == t)) ||
+                   (x < W - 1 && (w.terrain[y][x+1] == t));
+      bool vert  = (y > 0 && (w.terrain[y-1][x] == t)) ||
+                   (y < H - 1 && (w.terrain[y+1][x] == t));
+      if (horiz != vert) {                       // never at a junction
+        int lane = horiz ? y : x;
+        float dir = (lane & 1) ? 1.f : -1.f;
+        float s = horiz ? fx : fy;
+        uint32_t lh = hash3((uint32_t)lane, w.worldSeed, 0x7A4F1Cu);
+        bool quiet = (night > 0.7f) && ((lh % 3u) == 0u);   // small hours
+        if (!quiet) {
+          float spacing = 9.f + (float)(lh % 15u);
+          float speed = 5.0f + (float)((lh >> 5) % 8u);
+          float u = (s - dir * speed * animT) / spacing +
+                    (float)(lh % 100u) * 0.01f;
+          float cell = std::floor(u);
+          float f = u - cell;
+          if (f < 1.5f / spacing) {
+            uint32_t ch = hash3((uint32_t)lane, (uint32_t)(int)cell, w.worldSeed);
+            float p = br;
+            if (night > 0.35f) {
+              // Headlights coming, tail lights going.
+              bool coming = (dir > 0.f) == (horiz ? true : true);
+              if (((ch >> 3) & 1u) ^ (coming ? 0u : 1u)) {
+                rr = 255.f * p; gg = 240.f * p; bb = 205.f * p;
+              } else {
+                rr = 235.f * p; gg = 60.f * p; bb = 45.f * p;
+              }
+            } else {
+              switch (ch % 6u) {                 // daylight paintwork
+                case 0:  rr = 220.f; gg = 225.f; bb = 230.f; break;
+                case 1:  rr = 40.f;  gg = 44.f;  bb = 52.f;  break;
+                case 2:  rr = 190.f; gg = 60.f;  bb = 55.f;  break;
+                case 3:  rr = 70.f;  gg = 110.f; bb = 180.f; break;
+                case 4:  rr = 200.f; gg = 190.f; bb = 90.f;  break;
+                default: rr = 120.f; gg = 130.f; bb = 135.f; break;
+              }
+              rr *= br; gg *= br; bb *= br;
+            }
+          }
+        }
+      }
+    }
+
+    // Harbour: the skyline falls into the water, wobbling.
+    if (d > 0 && night > 0.05f) {
+      float wob = 1.4f * std::sin(fy * 0.8f + animT * 1.7f);
+      for (int k = 2; k <= 8; k += 3) {
+        int sxr = (int)(fx + wob), syr = y - k;
+        if (!inBounds(sxr, syr)) continue;
+        char src = w.terrain[syr][sxr];
+        float a = night * br * (0.30f - 0.03f * (float)k);
+        if (src == CITY_NEON) {
+          uint32_t nh = hash3((uint32_t)sxr, (uint32_t)syr, w.worldSeed);
+          switch ((nh >> 7) % 5u) {
+            case 0:  rr += 190.f * a; gg += 50.f * a;  bb += 120.f * a; break;
+            case 1:  rr += 55.f * a;  gg += 175.f * a; bb += 180.f * a; break;
+            case 2:  rr += 205.f * a; gg += 125.f * a; bb += 50.f * a;  break;
+            case 3:  rr += 120.f * a; gg += 190.f * a; bb += 90.f * a;  break;
+            default: rr += 190.f * a; gg += 70.f * a;  bb += 65.f * a;  break;
+          }
+        } else if (isCityBuilding(src)) {
+          uint32_t wh2 = hash3((uint32_t)sxr, (uint32_t)syr, 0x5711DEu ^ w.worldSeed);
+          if ((wh2 % 5u) == 0u) {
+            rr += 170.f * a; gg += 145.f * a; bb += 100.f * a;
+          }
+        }
+      }
+    }
+
+    // Boats. The ferry works her route whatever the weather; a freighter
+    // stands in and out; the moored ones nod at the quay.
+    if (d > 0) {
+      const CityBoats& B = pixelviewCityBoats(w, animT);
+      auto hull = [&](float bx, float by, float dx2, float dy2, float len,
+                      float wid) {
+        float px = fx - bx, py = fy - by;
+        float along = px * dx2 + py * dy2;
+        float across = -px * dy2 + py * dx2;
+        return (along * along) / (len * len) + (across * across) / (wid * wid);
+      };
+      if (B.ferryUp) {
+        float q = hull(B.ferX, B.ferY, B.ferDx, B.ferDy, 2.6f, 1.15f);
+        if (q < 1.f) {
+          rr = 232.f * br; gg = 234.f * br; bb = 238.f * br;   // white hull
+          if (q < 0.28f && night > 0.3f) {                     // lit saloon
+            rr = 255.f * br; gg = 226.f * br; bb = 160.f * br;
+          }
+        } else if (q < 2.6f) {
+          // Wake: foam trailing astern.
+          float px = fx - B.ferX, py = fy - B.ferY;
+          float along = px * B.ferDx + py * B.ferDy;
+          if (along < 0.f) {
+            uint32_t fh = hash3((uint32_t)x, (uint32_t)y,
+                                (uint32_t)(animT * 5.f) * 2654435761u);
+            if ((fh % 3u) == 0u) {
+              rr = rr * 0.4f + 205.f * br * 0.6f;
+              gg = gg * 0.4f + 225.f * br * 0.6f;
+              bb = bb * 0.4f + 240.f * br * 0.6f;
+            }
+          }
+        }
+        if (night > 0.35f) {   // nav lights: red to port, green to starboard
+          float px = fx - B.ferX, py = fy - B.ferY;
+          float across = -px * B.ferDy + py * B.ferDx;
+          float along = px * B.ferDx + py * B.ferDy;
+          if (along > 1.6f && along < 3.0f && std::fabs(across) > 0.6f &&
+              std::fabs(across) < 1.8f) {
+            if (across > 0.f) { rr = 60.f * br; gg = 240.f * br; bb = 90.f * br; }
+            else              { rr = 245.f * br; gg = 50.f * br; bb = 50.f * br; }
+          }
+        }
+      }
+      if (B.shipUp) {
+        float q = hull(B.shpX, B.shpY, B.shpDx, B.shpDy, 6.5f, 1.9f);
+        if (q < 1.f) {
+          float px = fx - B.shpX, py = fy - B.shpY;
+          float along = px * B.shpDx + py * B.shpDy;
+          if (along > 2.0f) {                    // stacked containers
+            uint32_t ch = hash3((uint32_t)x, (uint32_t)y, w.worldSeed ^ 0xC0A7u);
+            switch (ch % 4u) {
+              case 0:  rr = 170.f * br; gg = 55.f * br;  bb = 48.f * br; break;
+              case 1:  rr = 45.f * br;  gg = 95.f * br;  bb = 150.f * br; break;
+              case 2:  rr = 60.f * br;  gg = 130.f * br; bb = 90.f * br; break;
+              default: rr = 190.f * br; gg = 150.f * br; bb = 60.f * br; break;
+            }
+          } else {
+            rr = 48.f * br; gg = 52.f * br; bb = 62.f * br;   // hull and house
+            if (night > 0.3f && along < -3.5f) {
+              rr = 250.f * br; gg = 220.f * br; bb = 160.f * br;
+            }
+          }
+        }
+      }
+      for (int i = 0; i < B.mooredN; ++i) {
+        float dxm = fx - B.mooX[i], dym = fy - B.mooY[i];
+        if (dxm * dxm + dym * dym * 2.2f < 1.6f) {
+          rr = 208.f * br; gg = 206.f * br; bb = 196.f * br;
+          if (night > 0.4f && ((hash3((uint32_t)i, 0x11u, w.worldSeed) & 1u) == 0u)) {
+            rr = 250.f * br; gg = 210.f * br; bb = 120.f * br;
+          }
+        }
+      }
+    }
   }
 
   // Alpine aurora: slow green/violet curtains wash over the night.
@@ -508,6 +1086,47 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
           float fade = (1.f - back / 7.f) * 0.8f * br;
           rr += 200.f * fade; gg += 205.f * fade; bb += 215.f * fade;
         }
+      }
+    }
+  }
+
+  // Alien biology is its own light source: the blooms and pods do not go
+  // dark at dusk, they take over. Emission is added after the day/night
+  // grade and scaled by how dark it has got, so the world inverts from a
+  // strange daylight into a glowing one.
+  if (w.biome == ALIEN) {
+    const float br = displayBrightness();
+    const float dark = std::clamp(1.0f - dl.level, 0.0f, 1.0f);
+    if (e == ' ' && d == 0) {
+      float emit = 0.f;
+      switch (t) {
+        case 'f': case '+': case '&': case '!': emit = 0.85f; break;
+        case 'm': emit = 0.70f; break;
+        case 'T': case 'Y': case 'P': emit = 0.18f; break;
+        case '#': emit = 0.10f; break;
+        case ',': case '"': case ';': case ':': emit = 0.04f; break;
+        default: break;
+      }
+      if (emit > 0.f) {
+        float pulse = 0.62f + 0.38f * std::sin(animT * 1.5f + (float)(h & 63u));
+        float p = emit * pulse * (0.25f + 0.75f * dark) * br;
+        rr += (float)r * p * 0.55f; gg += (float)g * p * 0.55f; bb += (float)b * p * 0.55f;
+      }
+    }
+    // Ammonia sea: the water is not Earth-blue.
+    if (d > 0) {
+      float vio = 0.5f + 0.5f * std::sin((float)x * 0.03f - (float)y * 0.02f + animT * 0.09f);
+      float nr = rr * 0.72f + bb * 0.30f * vio + 18.f * vio;
+      float ng = gg * 0.94f + 16.f * (1.f - vio);
+      float nb = bb * 0.88f + gg * 0.16f;
+      rr = nr; gg = ng; bb = nb;
+    }
+    // A bioluminescent tide sweeps the whole world every half minute or so.
+    {
+      float band = std::sin(((float)x + (float)y) * 0.06f - animT * 0.55f);
+      if (band > 0.92f) {
+        float p = (band - 0.92f) / 0.08f * 0.22f * br;
+        rr += 40.f * p; gg += 150.f * p; bb += 130.f * p;
       }
     }
   }

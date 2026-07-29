@@ -216,9 +216,47 @@ inline int countNeighborsChar(const Grid& g, int x, int y, char c) {
 
 enum Season { SPRING=0, SUMMER=1, AUTUMN=2, WINTER=3 };
 
-inline constexpr int BIOME_COUNT = 6;
+inline constexpr int BIOME_COUNT = 7;
 
-enum Biome { MEADOW=0, WETLAND=1, ALPINE=2, ALIEN=3, TROPICAL=4, DESERT=5 };
+enum Biome { MEADOW=0, WETLAND=1, ALPINE=2, ALIEN=3, TROPICAL=4, DESERT=5,
+             CITY=6 };
+
+// ---- City terrain glyphs ----
+// The city is a biome like any other: the same water, weather and day/night
+// run over it, and it grows and decays on its own clock. These live in the
+// terrain grid alongside the plants.
+inline constexpr char CITY_ROAD    = 'A';  // asphalt
+inline constexpr char CITY_WALK    = '_';  // sidewalk
+inline constexpr char CITY_LOW     = 'h';  // shops / low-rise
+inline constexpr char CITY_MID     = 'b';  // mid-rise block
+inline constexpr char CITY_TOWER   = 'k';  // concrete tower
+inline constexpr char CITY_GLASS   = 'G';  // glass tower
+inline constexpr char CITY_NEON    = 'n';  // signage
+inline constexpr char CITY_BRIDGE  = 'j';  // bridge / expressway deck
+inline constexpr char CITY_QUAY    = 'q';  // seawall, dock edge
+inline constexpr char CITY_LOT     = 'z';  // vacant lot / construction
+
+// City elevations. `height` doubles as storeys in the city: every cell of a
+// building carries the same value, which is how the renderer reads a whole
+// facade off the height field. Ground sits above the deepest water the
+// harbour can hold (bed 90 + depth 7 * 10 = 160) so the tide stays in it.
+inline constexpr int CITY_GROUND  = 170;  // road level
+inline constexpr int CITY_WALK_H  = 174;
+inline constexpr int CITY_QUAY_H  = 176;
+inline constexpr int CITY_PARK_H  = 172;
+inline constexpr int CITY_DECK_H  = 190;  // bridges / expressway
+inline constexpr int CITY_BASE_H  = 180;  // a 1-storey building
+inline constexpr int CITY_STOREY  = 2;    // height units per storey
+
+inline bool isCityBuilding(char c) {
+  return c == CITY_LOW || c == CITY_MID || c == CITY_TOWER || c == CITY_GLASS;
+}
+inline bool isCityPaved(char c) {
+  return c == CITY_ROAD || c == CITY_WALK || c == CITY_BRIDGE || c == CITY_QUAY;
+}
+inline bool isCityGlyph(char c) {
+  return isCityBuilding(c) || isCityPaved(c) || c == CITY_NEON || c == CITY_LOT;
+}
 
 enum Species : uint8_t {
   SPEC_WANDERER=0,
@@ -467,6 +505,17 @@ int displayBgMode();
 // Display contrast 0.5..1.8 around mid-grey, live via ~/.terrarium-contrast
 // (same polling pattern as brightness). Missing file = 1.0.
 float displayContrast();
+
+// Round-panel geometry, live via ~/.terrarium-panel ("<diameter> <x> <y>",
+// diameter in LEDs, offset in output pixels). diameter <= 0 means "use the
+// compiled world size". Lets the kiosk be aligned against the real disc
+// without a rebuild — see --panel/--calibrate in the pico build.
+struct PanelGeom {
+  int diameter = 0;
+  int offX = 0;
+  int offY = 0;
+};
+PanelGeom displayPanel();
 
 // Live weather: mirror the real local sky. A fetcher writes
 // ~/.terrarium-weather (Open-Meteo, every 10 min); the sim polls it and

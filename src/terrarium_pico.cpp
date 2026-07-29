@@ -43,6 +43,13 @@ struct PicoOptions {
   bool island = false;  // radial island worldgen with an ocean ring
   int driftMin = 0;     // voyage mode: pan to a new biome every N minutes
   uint32_t seed = 0;    // 0 = time-based
+  // Round-panel alignment. The world is compiled at W x H; `panel` is how
+  // many of those cells the physical disc actually shows, taken as a centred
+  // crop and blitted at (panelX, panelY). Build the world a few cells larger
+  // than the panel and these can be nudged live — no rebuild to re-align.
+  int panel = 0;        // 0 = use the full world
+  int panelX = 0, panelY = 0;
+  bool calibrate = false;  // draw the alignment target instead of the world
 };
 
 PicoOptions parseArgs(int argc, char** argv) {
@@ -57,6 +64,7 @@ PicoOptions parseArgs(int argc, char** argv) {
       else if (b == "alien") o.biome = ALIEN;
       else if (b == "tropical") o.biome = TROPICAL;
       else if (b == "desert") o.biome = DESERT;
+      else if (b == "city") o.biome = CITY;
     } else if (a == "--scale") {
       o.scale = std::clamp(std::atoi(next()), 1, 8);
     } else if (a == "--tps") {
@@ -71,6 +79,15 @@ PicoOptions parseArgs(int argc, char** argv) {
       o.island = true;
     } else if (a == "--drift") {
       o.driftMin = std::clamp(std::atoi(next()), 0, 1440);
+    } else if (a == "--panel") {
+      o.panel = std::clamp(std::atoi(next()), 8, std::min(W, H));
+    } else if (a == "--panel-x") {
+      o.panelX = std::atoi(next());
+    } else if (a == "--panel-y") {
+      o.panelY = std::atoi(next());
+    } else if (a == "--calibrate") {
+      o.calibrate = true;
+      o.circle = true;
     } else if (a == "--weather") {
       g_weatherMode = (next() == std::string("live")) ? 1 : 0;
     } else if (a == "--daynight") {
@@ -82,6 +99,50 @@ PicoOptions parseArgs(int argc, char** argv) {
     }
   }
   return o;
+}
+
+// Alignment target for a round panel whose true LED count nobody knows.
+// Photograph the panel with this up and read it off:
+//   * white outer ring  = the LAST row of LEDs the world will ever light.
+//     If a dark ring of LEDs sits outside it, --panel is too small.
+//   * arms mark the cardinal extremes: RED right, GREEN left, BLUE top,
+//     YELLOW bottom. An arm short of the rim on one side only means the
+//     image is off-centre — nudge --panel-x / --panel-y.
+//   * magenta pips step out from the centre every 10 cells, so a miss can
+//     be counted rather than guessed.
+uint32_t calibrationPixel(int x, int y, int cropX, int cropY, int n) {
+  const float c = (float)(n - 1) * 0.5f;
+  float px = (float)(x - cropX), py = (float)(y - cropY);
+  if (px < 0.f || py < 0.f || px >= (float)n || py >= (float)n)
+    return 0xFF000000u;
+  float dx = px - c, dy = py - c;
+  float dist = std::sqrt(dx * dx + dy * dy);
+  const float rad = (float)n * 0.5f;
+  if (dist > rad) return 0xFF000000u;
+
+  int ix = (int)px, iy = (int)py;
+  int ic = (int)c;
+  bool onRow = (iy == ic) || (n % 2 == 0 && iy == ic + 1);
+  bool onCol = (ix == ic) || (n % 2 == 0 && ix == ic + 1);
+
+  // Cardinal arms: the outermost three cells along each axis.
+  if (onRow && px >= (float)n - 3.f) return 0xFFFF2020u;  // right  red
+  if (onRow && px <= 2.f)            return 0xFF20FF20u;  // left   green
+  if (onCol && py <= 2.f)            return 0xFF4080FFu;  // top    blue
+  if (onCol && py >= (float)n - 3.f) return 0xFFFFE020u;  // bottom yellow
+
+  if (dist > rad - 1.f) return 0xFFFFFFFFu;               // outer ring
+
+  // Decade pips out from the centre, both axes.
+  if (onRow || onCol) {
+    float along = onRow ? std::fabs(dx) : std::fabs(dy);
+    int step = (int)(along + 0.5f);
+    if (step > 0 && step % 10 == 0) return 0xFFFF40FFu;   // magenta
+    return 0xFF303030u;                                   // dim crosshair
+  }
+  // Faint grid every 10 cells so the eye can walk the count.
+  if ((ix - ic) % 10 == 0 && (iy - ic) % 10 == 0) return 0xFF202020u;
+  return 0xFF000000u;
 }
 
 // Cell colors live in terrarium_pixelview.hpp (shared with the plugin UI).
@@ -103,9 +164,14 @@ int main(int argc, char** argv) {
 
   Uint32 flags = SDL_WINDOW_SHOWN;
   if (opt.fullscreen) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+  // Windowed size follows the panel crop, so a desktop preview shows exactly
+  // what the disc shows.
+  const int winCells =
+      std::clamp(opt.panel > 0 ? opt.panel : std::min(W, H), 8, std::min(W, H));
   SDL_Window* win =
       SDL_CreateWindow("terrarium-pico", SDL_WINDOWPOS_CENTERED,
-                       SDL_WINDOWPOS_CENTERED, W * opt.scale, H * opt.scale, flags);
+                       SDL_WINDOWPOS_CENTERED, winCells * opt.scale,
+                       winCells * opt.scale, flags);
   if (!win) {
     std::fprintf(stderr, "SDL_CreateWindow failed: %s\n", SDL_GetError());
     SDL_Quit();
@@ -248,11 +314,13 @@ int main(int argc, char** argv) {
       static const struct { Biome b; bool isl; } stops[] = {
           {MEADOW, false},  {WETLAND, false},  {ALPINE, false},
           {ALIEN, false},   {TROPICAL, false}, {DESERT, false},
+          {CITY, false},     // a harbour city
           {TROPICAL, true},  // a new island
       };
+      constexpr int kStops = (int)(sizeof(stops) / sizeof(stops[0]));
       int pick;
       do {
-        pick = (int)(hash3(++seed, 0xD21F7u, 0x5A11u) % 7u);
+        pick = (int)(hash3(++seed, 0xD21F7u, 0x5A11u) % (uint32_t)kStops);
       } while (stops[pick].b == world.biome && stops[pick].isl == world.island);
       nextWorld = World{};
       nextWorld.island = stops[pick].isl;
@@ -281,6 +349,19 @@ int main(int argc, char** argv) {
 #endif
 
     if (dirty) {
+      // Panel geometry, re-read every frame: ~/.terrarium-panel lets the
+      // kiosk be aligned against the live disc (a diameter there takes over
+      // the whole geometry, offsets included).
+      PanelGeom pg = displayPanel();
+      const int panelN =
+          std::clamp(pg.diameter > 0 ? pg.diameter
+                                     : (opt.panel > 0 ? opt.panel : std::min(W, H)),
+                     8, std::min(W, H));
+      const int panelX = (pg.diameter > 0) ? pg.offX : opt.panelX;
+      const int panelY = (pg.diameter > 0) ? pg.offY : opt.panelY;
+      const int cropX = (W - panelN) / 2;
+      const int cropY = (H - panelN) / 2;
+
       void* pixels = nullptr;
       int pitch = 0;
       if (SDL_LockTexture(frame, nullptr, &pixels, &pitch) == 0) {
@@ -337,13 +418,22 @@ int main(int argc, char** argv) {
           return 0xFF000000u | (ch(16) << 16) | (ch(8) << 8) | ch(0);
         };
 
-        const float cc = (float)W * 0.5f - 0.5f;
-        const float rad = (float)W * 0.5f;
+        // The disc only shows a `panelN`-cell square of the world, taken from
+        // the middle; the circle mask is measured against THAT, not the
+        // compiled world size, so a world built larger than the panel can be
+        // aligned live (see resolvePanel above).
+        const float cc = (float)cropX + (float)(panelN - 1) * 0.5f;
+        const float rad = (float)panelN * 0.5f;
         const bool warp = (kbZ != 1.f) || panning;
         for (int y = 0; y < H; ++y) {
           uint32_t* row = (uint32_t*)((uint8_t*)pixels + y * pitch);
           for (int x = 0; x < W; ++x) {
             uint32_t px;
+            if (opt.calibrate) {
+              px = calibrationPixel(x, y, cropX, cropY, panelN);
+              row[x] = px;
+              continue;
+            }
             if (!warp) {
               px = baseA[(size_t)y * W + x];
             } else {
@@ -355,7 +445,8 @@ int main(int argc, char** argv) {
               px = sampleBi(buf, wxf, wyf);
             }
             if (opt.circle) {
-              float dx = (float)x - cc, dy = (float)y - cc;
+              float dx = (float)x - cc;
+              float dy = (float)y - ((float)cropY + (float)(panelN - 1) * 0.5f);
               float dist = std::sqrt(dx * dx + dy * dy);
               if (dist > rad) { row[x] = 0xFF000000u; continue; }
               if (dist > rad - 1.5f) {
@@ -372,23 +463,31 @@ int main(int argc, char** argv) {
         SDL_UnlockTexture(frame);
       }
       SDL_RenderClear(ren);
+      SDL_Rect src{cropX, cropY, panelN, panelN};
       if (opt.fullscreen) {
-        // Fullscreen drives a specific physical panel: keep the world
-        // unstretched at scale and pin it to the TOP-LEFT of the output
-        // (the region the panel actually shows), rest stays black.
-        SDL_Rect dst{0, 0, W * opt.scale, H * opt.scale};
-        SDL_RenderCopy(ren, frame, nullptr, &dst);
+        // Fullscreen drives a specific physical panel: blit the panel's
+        // square of the world 1:1 at the offset the disc actually starts at
+        // (default top-left), rest of the framebuffer stays black.
+        SDL_Rect dst{panelX, panelY, panelN * opt.scale, panelN * opt.scale};
+        SDL_RenderCopy(ren, frame, &src, &dst);
       } else {
-        SDL_RenderCopy(ren, frame, nullptr, nullptr);
+        SDL_RenderCopy(ren, frame, &src, nullptr);
       }
       SDL_RenderPresent(ren);
       dirty = false;
 
-      char title[160];
-      std::snprintf(title, sizeof(title),
-                    "terrarium-pico | %s | tick %d | %s | tps %d%s",
-                    biomeName(world.biome), tick, weatherName(world.weather.state),
-                    tps, paused ? " | PAUSED" : "");
+      char title[200];
+      if (opt.calibrate) {
+        std::snprintf(title, sizeof(title),
+                      "terrarium-pico CALIBRATE | world %dx%d | panel %d @ %d,%d",
+                      W, H, panelN, panelX, panelY);
+      } else {
+        std::snprintf(title, sizeof(title),
+                      "terrarium-pico | %s | tick %d | %s | tps %d | panel %d%s",
+                      biomeName(world.biome), tick,
+                      weatherName(world.weather.state), tps, panelN,
+                      paused ? " | PAUSED" : "");
+      }
       SDL_SetWindowTitle(win, title);
     }
 

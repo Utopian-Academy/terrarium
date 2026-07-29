@@ -202,6 +202,33 @@ float displayContrast() {
   return cached;
 }
 
+// Panel geometry, live from ~/.terrarium-panel ("<diameter> <x> <y>").
+// The round LED disc's true diameter was never on a spec sheet, and the
+// output lands at whatever offset the panel's controller crops from — so
+// both are dialled in against the live panel instead of compiled in.
+// Missing file = defaults (caller's compiled world size, origin 0,0).
+PanelGeom displayPanel() {
+  static PanelGeom cached;
+  static std::chrono::steady_clock::time_point lastRead{};
+  auto now = std::chrono::steady_clock::now();
+  if (now - lastRead < std::chrono::seconds(1)) return cached;
+  lastRead = now;
+  const char* home = std::getenv("HOME");
+  if (!home) return cached;
+  std::string path = std::string(home) + "/.terrarium-panel";
+  PanelGeom pg;
+  if (FILE* f = std::fopen(path.c_str(), "r")) {
+    int d = 0, x = 0, y = 0;
+    int n = std::fscanf(f, "%d %d %d", &d, &x, &y);
+    if (n >= 1 && d > 0) pg.diameter = std::clamp(d, 8, 4096);
+    if (n >= 2) pg.offX = std::clamp(x, -4096, 4096);
+    if (n >= 3) pg.offY = std::clamp(y, -4096, 4096);
+    std::fclose(f);
+  }
+  cached = pg;
+  return cached;
+}
+
 float displayBrightness() {
   static float cached = 1.0f;
   static std::chrono::steady_clock::time_point lastRead{};
@@ -298,6 +325,13 @@ static inline uint8_t pickBiomeSpecies(Biome b, Rng& r){
       if(u<0.74f) return SPEC_ENGINEER;
       if(u<0.86f) return SPEC_SWARMER;
       return SPEC_WANDERER;
+    case CITY:  // pigeons, rats, cats, commuters — swarmers and opportunists
+      if(u<0.30f) return SPEC_SWARMER;
+      if(u<0.50f) return SPEC_TRICKSTER;
+      if(u<0.66f) return SPEC_PARASITE;
+      if(u<0.80f) return SPEC_ENGINEER;
+      if(u<0.90f) return SPEC_PACKHUNTER;
+      return SPEC_WANDERER;
     case MEADOW:
     default:
       if(u<0.18f) return SPEC_SWARMER;
@@ -329,6 +363,7 @@ const char* biomeName(Biome b) {
     case ALIEN:  return "alien";
     case TROPICAL: return "tropical";
     case DESERT: return "desert";
+    case CITY:   return "city";
   }
   return "meadow";
 }
@@ -366,6 +401,8 @@ BiomeWeights weightsFor(Biome b) {
       return {1.30f, 0.6f, 1.35f, 1.25f, 1.35f, 1.15f, 1.20f, 1.05f, 1.15f, 1.45f, 0.75f, 1.00f};
     case DESERT:
       return {0.05f, 1.10f, 0.05f, 0.10f, 0.10f, 0.10f, 0.20f, 0.10f, 0.35f, 0.15f, 1.45f, 0.40f};
+    case CITY:  // what grows here grows in parks and cracks — plus a harbour
+      return {0.30f, 0.30f, 0.25f, 0.35f, 0.45f, 0.30f, 0.55f, 0.25f, 0.60f, 0.70f, 0.30f, 0.35f};
   }
   return weightsFor(MEADOW);
 }
@@ -590,6 +627,7 @@ static inline uint32_t biomeSalt(Biome b) {
     case DESERT:   return 0xD3A5Eu;
     case TROPICAL: return 0x7A0F1u;
     case ALIEN:    return 0xA11E1u;
+    case CITY:     return 0xC17F0u;
     default:       return 0xBEEFu;
   }
 }
@@ -945,6 +983,275 @@ static void genHeight(World& w, uint32_t seed) {
   }
 }
 
+// ---------------- City worldgen ----------------
+// Laid down after the base terrain and before the plant passes, so parks,
+// street trees and the weeds in the cracks all come from the normal
+// vegetation rules. Height doubles as storeys: every cell of one building
+// carries the same value, which is what gives the renderer its facades.
+static void seedCity(World& w, Rng& r) {
+  // A harbour on one edge, and the downtown looking across it — the whole
+  // reason a city reads as a city from above is the water and the skyline.
+  const int edge = r.i(0, 3);  // 0 = N, 1 = E, 2 = S, 3 = W
+  const float bayDepth = 0.20f + 0.12f * r.u01();
+  const uint32_t coastSeed = w.worldSeed ^ 0x5EA51DEu;
+
+  auto coastAt = [&](float along) {
+    // Four octaves: a bay, then headlands, then inlets, then a ragged edge —
+    // a two-term wobble gave the harbour straight diagonal sides.
+    float wob = 0.62f
+              + 0.34f * std::sin(along * 3.1f + (float)(coastSeed & 63u))
+              + 0.20f * std::sin(along * 7.3f + (float)((coastSeed >> 6) & 63u))
+              + 0.055f * std::sin(along * 14.3f + (float)((coastSeed >> 12) & 63u))
+              + 0.022f * std::sin(along * 27.9f + (float)((coastSeed >> 18) & 63u));
+    return bayDepth * wob * 2.0f;
+  };
+
+  for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) {
+    float fx = (float)x / (float)(W - 1), fy = (float)y / (float)(H - 1);
+    float into, along;
+    switch (edge) {
+      case 0:  into = fy;        along = fx; break;
+      case 1:  into = 1.f - fx;  along = fy; break;
+      case 2:  into = 1.f - fy;  along = fx; break;
+      default: into = fx;        along = fy; break;
+    }
+    float shore = coastAt(along);
+    if (into < shore) {
+      float t = (shore - into) / std::max(0.02f, shore);  // 0 at the shore
+      w.water[y][x] = (uint8_t)std::clamp(2 + (int)(t * 6.f), 2, 7);
+      w.terrain[y][x] = '.';
+      // Harbour bed. Water flows to the lowest surface (bed + 10*depth), so
+      // the whole city sits above the deepest water it can ever hold —
+      // otherwise a spring tide runs up the avenues and never leaves.
+      w.height[y][x] = (uint8_t)std::max(0, 90 - (int)(t * 20.f));
+    } else {
+      w.water[y][x] = 0;
+      w.terrain[y][x] = CITY_LOT;
+      w.height[y][x] = CITY_GROUND;
+    }
+  }
+
+  // Downtown: a single core the towers cluster around, set back from the
+  // water so the skyline has a waterfront to stand behind.
+  float dcx, dcy;
+  switch (edge) {
+    case 0:  dcx = (0.30f + 0.40f * r.u01()) * W; dcy = (0.34f + 0.22f * r.u01()) * H; break;
+    case 1:  dcx = (0.44f + 0.22f * r.u01()) * W; dcy = (0.30f + 0.40f * r.u01()) * H; break;
+    case 2:  dcx = (0.30f + 0.40f * r.u01()) * W; dcy = (0.44f + 0.22f * r.u01()) * H; break;
+    default: dcx = (0.34f + 0.22f * r.u01()) * W; dcy = (0.30f + 0.40f * r.u01()) * H; break;
+  }
+  const float coreR = (float)std::min(W, H) * (0.19f + 0.05f * r.u01());
+
+  auto downtown01 = [&](int x, int y) {  // 1 at the core, 0 at the fringe
+    float dx = (float)x - dcx, dy = (float)y - dcy;
+    float d = std::sqrt(dx * dx + dy * dy) / coreR;
+    return std::clamp(1.0f - d, 0.0f, 1.0f);
+  };
+
+  auto paveRoad = [&](int x, int y) {
+    if (!inBounds(x, y)) return;
+    if (w.water[y][x] > 0) return;   // bridges are laid separately
+    w.terrain[y][x] = CITY_ROAD;
+    w.height[y][x] = CITY_GROUND;
+  };
+
+  // ---- Street grid: avenues, then the streets between them ----
+  std::vector<int> avX, avY, stX, stY;
+  for (int x = r.i(5, 13); x < W - 4; ) {
+    avX.push_back(x);
+    x += r.i(13, 31);
+  }
+  for (int y = r.i(5, 13); y < H - 4; ) {
+    avY.push_back(y);
+    y += r.i(13, 31);
+  }
+  for (size_t i = 0; i + 1 < avX.size(); ++i) {
+    int gap = avX[i + 1] - avX[i];
+    if (gap >= 15 && !r.oneIn(5)) stX.push_back(avX[i] + gap / 2 + r.i(-3, 3));
+    if (gap >= 26) stX.push_back(avX[i] + gap / 4 + r.i(-2, 2));
+  }
+  for (size_t i = 0; i + 1 < avY.size(); ++i) {
+    int gap = avY[i + 1] - avY[i];
+    if (gap >= 15 && !r.oneIn(5)) stY.push_back(avY[i] + gap / 2 + r.i(-3, 3));
+    if (gap >= 26) stY.push_back(avY[i] + gap / 4 + r.i(-2, 2));
+  }
+
+  for (int ax : avX) for (int y = 0; y < H; ++y)
+    for (int d = -1; d <= 1; ++d) paveRoad(ax + d, y);
+  for (int ay : avY) for (int x = 0; x < W; ++x)
+    for (int d = -1; d <= 1; ++d) paveRoad(x, ay + d);
+  for (int sx : stX) for (int y = 0; y < H; ++y) paveRoad(sx, y);
+  for (int sy : stY) for (int x = 0; x < W; ++x) paveRoad(x, sy);
+
+  // Sidewalks wrap every road that still has a lot beside it.
+  for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) {
+    if (w.terrain[y][x] != CITY_LOT) continue;
+    bool nextToRoad = false;
+    const int dx4s[4] = {1, -1, 0, 0}, dy4s[4] = {0, 0, 1, -1};
+    for (int k = 0; k < 4 && !nextToRoad; ++k) {
+      int nx = x + dx4s[k], ny = y + dy4s[k];
+      if (inBounds(nx, ny) && w.terrain[ny][nx] == CITY_ROAD) nextToRoad = true;
+    }
+    if (nextToRoad) { w.terrain[y][x] = CITY_WALK; w.height[y][x] = CITY_WALK_H; }
+  }
+
+  // ---- Blocks: flood the lots between roads and build on each ----
+  std::vector<std::vector<uint8_t>> seen(H, std::vector<uint8_t>(W, 0));
+  std::vector<std::pair<int,int>> block;
+  std::vector<std::pair<int,int>> stack;
+  for (int by = 0; by < H; ++by) for (int bx = 0; bx < W; ++bx) {
+    if (seen[by][bx] || w.terrain[by][bx] != CITY_LOT) continue;
+    block.clear();
+    stack.clear();
+    stack.push_back({bx, by});
+    seen[by][bx] = 1;
+    while (!stack.empty()) {
+      auto [cx, cy] = stack.back();
+      stack.pop_back();
+      block.push_back({cx, cy});
+      const int dx4[4] = {1, -1, 0, 0}, dy4[4] = {0, 0, 1, -1};
+      for (int k = 0; k < 4; ++k) {
+        int nx = cx + dx4[k], ny = cy + dy4[k];
+        if (!inBounds(nx, ny) || seen[ny][nx]) continue;
+        if (w.terrain[ny][nx] != CITY_LOT) continue;
+        seen[ny][nx] = 1;
+        stack.push_back({nx, ny});
+      }
+    }
+    if (block.empty()) continue;
+
+    int cx = 0, cy = 0;
+    for (auto& p : block) { cx += p.first; cy += p.second; }
+    cx /= (int)block.size(); cy /= (int)block.size();
+    float dt = downtown01(cx, cy);
+
+    // District roll: parks and vacant ground stay, everything else builds.
+    float roll = r.u01();
+    if (roll < (0.04f + 0.07f * (1.f - dt)) * (dt > 0.50f ? 0.15f : 1.f)) {
+      for (auto& p : block) {           // park — the plant passes fill it in
+        w.terrain[p.second][p.first] = ',';
+        w.height[p.second][p.first] = CITY_PARK_H;
+      }
+      continue;
+    }
+    if (roll > 0.96f) continue;         // a lot left empty; it may build later
+
+    // Lots: chop the block into building footprints of a few cells each.
+    // The lot grid is anchored to THIS block, so neighbouring blocks don't
+    // share a subdivision and the city stops reading as graph paper.
+    int lotW = r.i(3, 6), lotH = r.i(3, 6);
+    int ox0 = r.i(0, lotW - 1), oy0 = r.i(0, lotH - 1);
+    uint32_t blockSalt = hash3((uint32_t)bx, (uint32_t)by, w.worldSeed ^ 0xB10Cu);
+    for (auto& p : block) {
+      int lx = (p.first + ox0) / lotW, ly = (p.second + oy0) / lotH;
+      uint32_t lh = hash3((uint32_t)lx, (uint32_t)ly, blockSalt);
+      float lotRoll = (float)(lh & 1023u) / 1023.f;
+      // Storeys: downtown is tall, the fringe is low; each lot is uniform so
+      // the renderer can read a whole building off the height field.
+      float tall = dt * dt * dt * (0.60f + 0.40f * (float)((lh >> 10) & 255u) / 255.f);
+      // Every lot gets its own storey count: uniform heights made whole
+      // districts share one roof colour and flattened the skyline.
+      int storeys = 2 + (int)(tall * 34.f) + (int)((lh >> 18) % 5u);
+      if (((lh >> 23) % 11u) == 0u) storeys += 3 + (int)((lh >> 26) % 9u);  // a spike
+      char kind;
+      if (storeys >= 18)      kind = (lotRoll < 0.55f) ? CITY_GLASS : CITY_TOWER;
+      else if (storeys >= 9)  kind = (lotRoll < 0.25f) ? CITY_GLASS : CITY_MID;
+      else                    kind = CITY_LOW;
+      w.terrain[p.second][p.first] = kind;
+      w.height[p.second][p.first] =
+          (uint8_t)std::clamp(CITY_BASE_H + storeys * CITY_STOREY, CITY_BASE_H, 255);
+    }
+  }
+
+  // ---- Neon: signage on the street-facing skin of low buildings ----
+  for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) {
+    char t = w.terrain[y][x];
+    if (t != CITY_LOW && t != CITY_MID) continue;
+    bool facesStreet = false;
+    for (int k = 0; k < 4 && !facesStreet; ++k) {
+      const int dx4[4] = {1, -1, 0, 0}, dy4[4] = {0, 0, 1, -1};
+      int nx = x + dx4[k], ny = y + dy4[k];
+      if (inBounds(nx, ny) &&
+          (w.terrain[ny][nx] == CITY_WALK || w.terrain[ny][nx] == CITY_ROAD))
+        facesStreet = true;
+    }
+    if (!facesStreet) continue;
+    float dt = downtown01(x, y);
+    if (r.u01() < 0.05f + 0.22f * dt) w.terrain[y][x] = CITY_NEON;
+  }
+
+  // ---- Quays where the built city meets the water ----
+  for (int y = 0; y < H; ++y) for (int x = 0; x < W; ++x) {
+    if (w.water[y][x] > 0 || w.terrain[y][x] == '.') continue;
+    if (countNeighborsWater(w.water, x, y) == 0) continue;
+    if (w.terrain[y][x] == ',' || isTree(w.terrain[y][x])) continue;
+    w.terrain[y][x] = CITY_QUAY;
+    w.height[y][x] = CITY_QUAY_H;
+  }
+
+  // ---- Bridges: carry the avenues over the water ----
+  auto bridgeLine = [&](bool horizontal, int fixed) {
+    int span = horizontal ? W : H;
+    int runStart = -1;
+    for (int i = 0; i <= span; ++i) {
+      int x = horizontal ? i : fixed;
+      int y = horizontal ? fixed : i;
+      bool wet = (i < span) && inBounds(x, y) && w.water[y][x] > 0;
+      if (wet && runStart < 0) runStart = i;
+      if (!wet && runStart >= 0) {
+        int len = i - runStart;
+        if (len >= 3 && len <= std::max(W, H) / 2) {  // a crossing, not the open bay
+          for (int k = runStart; k < i; ++k) {
+            for (int d = -1; d <= 1; ++d) {
+              int bx = horizontal ? k : fixed + d;
+              int by = horizontal ? fixed + d : k;
+              if (inBounds(bx, by)) {
+                w.terrain[by][bx] = CITY_BRIDGE;
+                w.height[by][bx] = CITY_DECK_H;
+              }
+            }
+          }
+        }
+        runStart = -1;
+      }
+    }
+  };
+  for (int ax : avX) bridgeLine(false, ax);
+  for (int ay : avY) bridgeLine(true, ay);
+
+  // ---- The expressway: one long elevated curve over the whole city ----
+  {
+    bool horizontal = r.oneIn(2);
+    float amp = (float)(horizontal ? H : W) * (0.10f + 0.08f * r.u01());
+    float base = (float)(horizontal ? H : W) * (0.30f + 0.40f * r.u01());
+    float ph = r.u01() * 6.28f, freq = 0.9f + 1.4f * r.u01();
+    int span = horizontal ? W : H;
+    for (int i = 0; i < span; ++i) {
+      float f = (float)i / (float)span;
+      float off = base + amp * std::sin(f * freq * 6.28f + ph);
+      for (int d = -1; d <= 1; ++d) {
+        int x = horizontal ? i : (int)off + d;
+        int y = horizontal ? (int)off + d : i;
+        if (!inBounds(x, y)) continue;
+        w.terrain[y][x] = CITY_BRIDGE;
+        w.height[y][x] = CITY_DECK_H;
+      }
+    }
+  }
+
+  // Street trees along some avenues, and the harbour's own edge life.
+  for (int ax : avX) {
+    if (!r.oneIn(2)) continue;
+    for (int y = 0; y < H; ++y) {
+      int x = ax + (r.oneIn(2) ? 2 : -2);
+      if (!inBounds(x, y) || w.terrain[y][x] != CITY_WALK) continue;
+      if ((y % r.i(4, 7)) == 0) w.terrain[y][x] = 'T';
+    }
+  }
+
+  w.ventX = -1; w.ventY = -1; w.eruptEnd = 0;
+}
+
 void seedWorld(World& w, Rng& r, Biome biome) {
   
   w.worldSeed = r.u32();
@@ -1005,6 +1312,8 @@ w.biome = biome;
         else w.water[y][x] = (uint8_t)std::max<int>(w.water[y][x], 1);
       }
     }
+  } else if (biome == CITY) {
+    seedCity(w, r);
   } else if (biome == TROPICAL) {
     // Ocean-heavy: low altitude becomes sea; high altitude becomes islands.
     for (int y=0;y<H;++y) for (int x=0;x<W;++x) {
@@ -1021,6 +1330,7 @@ w.biome = biome;
 
   int basePonds = std::max(4, (W * H) / 9000);
   int ponds = std::max(2, (int)(basePonds * w.bw.pondDensity));
+  if (biome == CITY) ponds = 0;  // the harbour is the water here
   for (int p=0; p<ponds; ++p) {
     int marginX = std::max(12, W/18);
     int marginY = std::max(8,  H/18);
@@ -1114,6 +1424,8 @@ w.biome = biome;
 
 for (int y=0;y<H;++y) for (int x=0;x<W;++x) {
     if (w.water[y][x] > 0) continue;
+    // In the city, height is storeys — a 30-floor tower is not a mountain.
+    if (isCityGlyph(w.terrain[y][x])) continue;
     uint8_t alt = w.height[y][x];
     if (alt > 245) { w.terrain[y][x] = 'M'; if (biome==ALPINE) w.terrain[y][x] = '*'; continue; }
     if (alt > 232 && (biome==ALPINE ? r.oneIn(1) : r.oneIn(2))) w.terrain[y][x] = '^';
@@ -1122,6 +1434,7 @@ for (int y=0;y<H;++y) for (int x=0;x<W;++x) {
 
   for (int y=0; y<H; ++y) for (int x=0; x<W; ++x) {
     if (w.water[y][x] > 0) continue;
+    if (isCityGlyph(w.terrain[y][x])) continue;  // no reeds through the asphalt
     // altGrow is currently not used in seedWorld; kept for potential future tuning.
     // float altGrow = 1.0f;
     // if (alt > 220) altGrow *= 0.45f;
@@ -1240,6 +1553,16 @@ for (int y=0;y<H;++y) for (int x=0;x<W;++x) {
     if (biome==ALPINE)  springCount = 1;
     if (biome==TROPICAL) springCount = 2;
     if (biome==ALIEN)   springCount = 2;
+    if (biome==CITY) {
+      // The tide keeps the harbour full; a spring hunting for a low basin
+      // would sink a pond into the middle of downtown instead.
+      springCount = 0;
+      int added = 0;
+      for (int tries = 0; tries < 6000 && added < 2; ++tries) {
+        int x = r.i(0, W-1), y = r.i(0, H-1);
+        if (w.water[y][x] >= 5) { w.springs.emplace_back(x, y); ++added; }
+      }
+    }
 
     auto tooClose = [&](int x,int y){
       for (auto &p : w.springs) {
@@ -1372,6 +1695,7 @@ static float biomeWetTarget(Biome b) {
     case ALIEN:    return 0.28f;
     case DESERT:   return 0.08f;
     case ALPINE:   return 0.18f;
+    case CITY:     return 0.26f;  // the harbour, and it stays a harbour
     default:       return 0.22f;  // meadow
   }
 }
@@ -1613,6 +1937,77 @@ static void waterSinks(World& w, Rng& r, Season s) {
 }
 
 
+
+// ---------------- City succession ----------------
+// A city is an ecology on a slower clock: lots are cleared and rebuilt, low
+// blocks are replaced by taller ones where the land is worth it, signage
+// comes and goes, and anything left alone long enough goes green. Rates are
+// tuned for a kiosk — a visible change every few minutes, a different
+// skyline by the end of the day, and no runaway in either direction.
+static void stepCity(World& w, Rng& r, int tick) {
+  const int lots = std::max(1, (W * H) / 900);
+  for (int k = 0; k < lots; ++k) {
+    int x = r.i(0, W - 1), y = r.i(0, H - 1);
+    if (w.water[y][x] > 0) continue;
+    char t = w.terrain[y][x];
+    int h = (int)w.height[y][x];
+
+    // Demand: tall neighbours mean a valuable block.
+    int tallNear = 0, greenNear = 0;
+    for (int oy = -2; oy <= 2; ++oy) for (int ox = -2; ox <= 2; ++ox) {
+      int nx = x + ox, ny = y + oy;
+      if (!inBounds(nx, ny) || (!ox && !oy)) continue;
+      char n = w.terrain[ny][nx];
+      if (isCityBuilding(n) && w.height[ny][nx] > (uint8_t)h) ++tallNear;
+      if (isVeg(n) || isTree(n)) ++greenNear;
+    }
+
+    if (t == CITY_LOT) {
+      // Vacant ground: it builds, or the weeds get there first.
+      if (r.oneIn(greenNear > 3 ? 40 : 260)) { w.terrain[y][x] = ','; continue; }
+      if (r.oneIn(90)) {
+        w.terrain[y][x] = (tallNear > 6) ? CITY_MID : CITY_LOW;
+        w.height[y][x] = (uint8_t)std::clamp(
+            CITY_BASE_H + (tallNear > 6 ? 10 : 3) * CITY_STOREY, CITY_BASE_H, 255);
+      }
+      continue;
+    }
+
+    if (isCityBuilding(t)) {
+      // Redevelopment: a block goes up a class when its neighbours have.
+      if (r.oneIn(1400) && tallNear >= 8) {
+        char up = (t == CITY_LOW) ? CITY_MID
+                : (t == CITY_MID) ? (r.oneIn(2) ? CITY_GLASS : CITY_TOWER)
+                : t;
+        if (up != t) {
+          w.terrain[y][x] = up;
+          w.height[y][x] = (uint8_t)std::min(255, h + 6 * CITY_STOREY);
+        } else if (h < 250) {
+          w.height[y][x] = (uint8_t)std::min(255, h + CITY_STOREY);
+        }
+      }
+      // Demolition: rarer than building, or the skyline only ever grows.
+      else if (r.oneIn(9000)) {
+        w.terrain[y][x] = CITY_LOT;
+        w.height[y][x] = CITY_GROUND;
+      }
+      continue;
+    }
+
+    if (t == CITY_NEON) {
+      if (r.oneIn(3000)) w.terrain[y][x] = CITY_LOW;  // the sign comes down
+      continue;
+    }
+
+    // Pavement cracks: grass takes a sidewalk cell beside a park.
+    if (t == CITY_WALK && greenNear >= 4 && r.oneIn(2200)) w.terrain[y][x] = ',';
+    // ...and the city takes it back.
+    if ((t == ',' || t == '"') && greenNear <= 1 && r.oneIn(2600) &&
+        (int)w.height[y][x] <= CITY_PARK_H)
+      w.terrain[y][x] = CITY_WALK;
+  }
+  (void)tick;
+}
 
 // ---------------- Terrain ecology ----------------
 static void stepTerrain(World& w, Rng& r, Season s, int tick) {
@@ -2492,6 +2887,7 @@ void step(World& w, Rng& r, std::string& banner, int tick) {
   stepWater(w, r);
   waterSinks(w, r, s);
   stepTerrain(w, r, s, tick);
+  if (w.biome == CITY) stepCity(w, r, tick);
   stepEntities(w, r, tick);
   applyRippleChaos(w, r, tick);
   maybeSpawnAncientTree(w, r);

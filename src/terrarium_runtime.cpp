@@ -85,6 +85,7 @@ Biome parseBiomeName(const std::string& value) {
   if (value == "alien") return ALIEN;
   if (value == "tropical") return TROPICAL;
   if (value == "desert") return DESERT;
+  if (value == "city") return CITY;
   return MEADOW;
 }
 
