@@ -465,11 +465,14 @@ inline const AlienHead& pixelviewAlienHead(const World& w, float animT) {
   static AlienHead A;
   if (A.t == animT) return A;
   A.t = animT;
-  const float kEpoch = 240.f, kDwell = 26.f;
+  // Lugia-rare: one epoch in eleven, a quarter-hour apart, for half a minute.
+  // That is about one appearance per three hours the alien world is up —
+  // and it is one voyage stop in nine, so most days you will not see it.
+  const float kEpoch = 900.f, kDwell = 30.f;
   uint32_t ep = (uint32_t)(animT / kEpoch);
   uint32_t hh = hash3(ep, w.worldSeed, 0x8EAD5u);
   float age = animT - (float)ep * kEpoch;
-  A.up = ((hh % 3u) == 0u) && age < kDwell;
+  A.up = ((hh % 11u) == 0u) && age < kDwell;
 #ifdef TERRA_FORCE_HEAD
   A.up = true; age = std::fmod(animT, kDwell * 2.f) * 0.5f + 6.f;
 #endif
