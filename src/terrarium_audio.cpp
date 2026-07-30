@@ -597,6 +597,12 @@ auto regenPattern = [&](){
   static const int DES_A[] = { 30, 36, 42, 48, 60 };
   static const int DES_B[] = { 24, 30, 36, 54, 72 };
   static const int ALI_A[] = {  7, 11, 13, 17, 19, 23 };
+  // City: short, even, insistent — a groove, with a busier variant.
+  static const int CIT_A[] = {  6,  9, 12, 12,  9 };
+  static const int CIT_B[] = {  6,  6,  9, 12, 15 };
+  // Ocean: long swells and a lot of room between them.
+  static const int OCE_A[] = { 36, 48, 60, 72 };
+  static const int OCE_B[] = { 30, 36, 48, 90 };
   static const int ALI_B[] = {  9, 12, 15, 18, 21, 27 };
 
   float fastBias = std::clamp(activity * (0.65f + 0.35f*wind01), 0.0f, 1.0f);
@@ -634,6 +640,19 @@ auto regenPattern = [&](){
                       std::clamp(0.20f + 0.25f*fastBias, 0.0f, 1.0f));
       break;
     }
+    case CITY: {
+      // Busier when the streets are busy: rush hour drives the variant.
+      base = pickPool(CIT_A, (int)(sizeof(CIT_A)/sizeof(CIT_A[0])),
+                      CIT_B, (int)(sizeof(CIT_B)/sizeof(CIT_B[0])),
+                      std::clamp(0.30f + 0.50f*fastBias + 0.30f*diversity01, 0.0f, 1.0f));
+      break;
+    }
+    case OCEAN: {
+      base = pickPool(OCE_A, (int)(sizeof(OCE_A)/sizeof(OCE_A[0])),
+                      OCE_B, (int)(sizeof(OCE_B)/sizeof(OCE_B[0])),
+                      std::clamp(0.25f + 0.35f*wind01, 0.0f, 1.0f));
+      break;
+    }
     case ALIEN: default: {
       // Odd meters show up more when fauna is high or lifecycle is near mid-year.
       base = pickPool(ALI_B, (int)(sizeof(ALI_B)/sizeof(ALI_B[0])),
@@ -656,6 +675,10 @@ auto regenPattern = [&](){
   else if (base==DES_A) n=(int)(sizeof(DES_A)/sizeof(DES_A[0]));
   else if (base==DES_B) n=(int)(sizeof(DES_B)/sizeof(DES_B[0]));
   else if (base==ALI_A) n=(int)(sizeof(ALI_A)/sizeof(ALI_A[0]));
+  else if (base==CIT_A) n=(int)(sizeof(CIT_A)/sizeof(CIT_A[0]));
+  else if (base==CIT_B) n=(int)(sizeof(CIT_B)/sizeof(CIT_B[0]));
+  else if (base==OCE_A) n=(int)(sizeof(OCE_A)/sizeof(OCE_A[0]));
+  else if (base==OCE_B) n=(int)(sizeof(OCE_B)/sizeof(OCE_B[0]));
   else n=(int)(sizeof(ALI_B)/sizeof(ALI_B[0]));
 
   // Phrase length: biome-dependent.
@@ -666,6 +689,8 @@ auto regenPattern = [&](){
     case WETLAND: minL=5; maxL=8; break;
     case TROPICAL: minL=6; maxL=8; break;
     case ALIEN: minL=5; maxL=8; break;
+    case CITY: minL=6; maxL=8; break;   // long, looping phrases
+    case OCEAN: minL=3; maxL=5; break;  // a few notes, then space
     case MEADOW: default: minL=5; maxL=8; break;
   }
   phraseLen = std::clamp(minL + (int)std::lround((maxL-minL) * (0.35f + 0.55f*diversity01)) + r.irange(-1,1), minL, maxL);
@@ -679,6 +704,8 @@ auto regenPattern = [&](){
   else if (world.biome==TROPICAL) repeatP = 0.45f;
   else if (world.biome==DESERT) repeatP = 0.50f;
   else if (world.biome==ALIEN) repeatP = 0.35f;
+  else if (world.biome==CITY) repeatP = 0.66f;   // city pop is a groove
+  else if (world.biome==OCEAN) repeatP = 0.42f;  // sets never repeat exactly
 
   for (int i=0;i<8;i++){
     int v = base[r.irange(0, n-1)];
@@ -690,6 +717,8 @@ auto regenPattern = [&](){
     if (world.biome==ALPINE)  sync -= 0.04f;
     if (world.biome==DESERT)  sync -= 0.02f;
     if (world.biome==ALIEN)   sync += 0.16f;
+    if (world.biome==CITY)    sync += 0.18f;   // off-beats are the point
+    if (world.biome==OCEAN)   sync -= 0.05f;
 
     if (r.u01() < sync) v = base[r.irange(0, n-1)];
 
@@ -698,6 +727,8 @@ auto regenPattern = [&](){
     if (world.biome==ALPINE) restP += 0.10f;
     if (world.biome==DESERT) restP += 0.12f;
     if (world.biome==WETLAND) restP += 0.04f;
+  if (world.biome==OCEAN) restP += 0.16f;   // mostly the sound of waiting
+  if (world.biome==CITY) restP -= 0.02f;
     if (r.u01() < restP) v += 12;
 
     // Encourage repetition: copy a previous cell.
@@ -755,6 +786,8 @@ switch (world.biome) {
   case TROPICAL: regBias = +4; break;  // lively higher motion
   case DESERT:   regBias = -6; break;  // sparse low tones
   case ALIEN:    regBias = +0; break;  // uncanny center
+  case CITY:     regBias = +3; break;  // bright electric piano register
+  case OCEAN:    regBias = -8; break;  // deep, and a long way off
 }
 target += (float)regBias;
 
@@ -773,6 +806,10 @@ int leap = 0;
   static const int TRO[] = { -7,-5,-3,-2,0,2,3,5,7,9,12 };
   static const int DES[] = { -5,-3,-2,0,2,3,5,7 };
   static const int ALI[] = { -11,-6,-1,0,1,6,11,13,-13 };
+  // City: 9ths and 6ths, the intervals city pop leans on.
+  static const int CIT[] = { -9,-7,-5,-4,-2,0,2,4,5,7,9,14 };
+  // Ocean: wide, slow, mostly open fifths and octaves.
+  static const int OCE[] = { -12,-7,-5,0,5,7,12 };
 
   const int* pool = MEA; int n = (int)(sizeof(MEA)/sizeof(MEA[0]));
   switch(world.biome){
@@ -781,6 +818,8 @@ int leap = 0;
     case TROPICAL:pool=TRO; n=(int)(sizeof(TRO)/sizeof(TRO[0])); break;
     case DESERT:  pool=DES; n=(int)(sizeof(DES)/sizeof(DES[0])); break;
     case ALIEN:   pool=ALI; n=(int)(sizeof(ALI)/sizeof(ALI[0])); break;
+    case CITY:    pool=CIT; n=(int)(sizeof(CIT)/sizeof(CIT[0])); break;
+    case OCEAN:   pool=OCE; n=(int)(sizeof(OCE)/sizeof(OCE[0])); break;
     case MEADOW: default: break;
   }
 
@@ -811,6 +850,8 @@ switch (world.biome) {
   case TROPICAL: spread += 2; break;
   case DESERT:   spread -= 1; break;
   case ALIEN:    spread += 3; break;
+  case CITY:     spread += 2; break;
+  case OCEAN:    spread += 4; break;
 }
 spread = std::clamp(spread, 1, 12);
 
@@ -825,6 +866,8 @@ switch (world.biome) {
   case TROPICAL: sparkleP += 0.03f; break;
   case DESERT:   sparkleP -= 0.03f; break;
   case ALIEN:    sparkleP += 0.01f; break;
+  case CITY:     sparkleP += 0.04f; break;   // neon glints
+  case OCEAN:    sparkleP -= 0.02f; break;
 }
 sparkleP = std::clamp(sparkleP, 0.0f, 0.30f);
 
@@ -843,6 +886,8 @@ switch (world.biome) {
   case TROPICAL: harmP += 0.04f; break;
   case DESERT:   harmP -= 0.18f; break;
   case ALIEN:    harmP += (r.u01()<0.5f ? -0.08f : 0.08f); break;
+  case CITY:     harmP += 0.22f; break;   // lush: it is nearly always a chord
+  case OCEAN:    harmP += 0.12f; break;   // open, suspended
 }
 harmP = std::clamp(harmP, 0.02f, 0.90f);
 

@@ -10,6 +10,29 @@ const uint8_t* glyph8_world(unsigned char c) {
 
   static const uint8_t COMMA[8] = {0x00, 0x00, 0x00, 0x00,
                                    0x00, 0x18, 0x18, 0x10};
+  // ---- City, drawn the way DF draws a fortress: mass as solid block, the
+  // rest as sparse punctuation so streets read as negative space. ----
+  static const uint8_t C_ROAD[8] = {0x00, 0x00, 0x00, 0x24,
+                                    0x00, 0x00, 0x00, 0x24};   // dotted floor
+  static const uint8_t C_WALK[8] = {0x00, 0x55, 0x00, 0x00,
+                                    0x00, 0x55, 0x00, 0x00};   // paving stipple
+  static const uint8_t C_LOW[8]  = {0x00, 0x00, 0x3C, 0x24,
+                                    0x24, 0x3C, 0x00, 0x00};   // low block
+  static const uint8_t C_MID[8]  = {0x00, 0x7E, 0x42, 0x5A,
+                                    0x5A, 0x42, 0x7E, 0x00};   // taller block
+  static const uint8_t C_TOWER[8]= {0xFF, 0xFF, 0xFF, 0xFF,
+                                    0xFF, 0xFF, 0xFF, 0xFF};   // solid mass
+  static const uint8_t C_GLASS[8]= {0xFF, 0xDB, 0xDB, 0xFF,
+                                    0xDB, 0xDB, 0xFF, 0xDB};   // curtain wall
+  static const uint8_t C_NEON[8] = {0x18, 0x18, 0xDB, 0x7E,
+                                    0x7E, 0xDB, 0x18, 0x18};   // a starburst
+  static const uint8_t C_BRIDGE[8]={0x00, 0x00, 0xFF, 0x00,
+                                    0x00, 0xFF, 0x00, 0x00};   // double rule
+  static const uint8_t C_QUAY[8] = {0x00, 0x00, 0x00, 0x00,
+                                    0xFF, 0xFF, 0x00, 0x00};   // seawall
+  static const uint8_t C_LOT[8]  = {0x00, 0x42, 0x00, 0x10,
+                                    0x00, 0x42, 0x00, 0x08};   // rubble
+
   static const uint8_t DASH[8] = {0x00, 0x00, 0x00, 0x7E,
                                   0x00, 0x00, 0x00, 0x00};
   static const uint8_t WAVE[8] = {0x00, 0x00, 0x52, 0x2A,
@@ -222,6 +245,26 @@ const uint8_t* glyph8_world(unsigned char c) {
                                   0x18, 0x18, 0x18, 0x18};
 
   switch (c) {
+    case 'R':
+      return C_ROAD;
+    case '_':
+      return C_WALK;
+    case 'h':
+      return C_LOW;
+    case 'N':
+      return C_MID;
+    case 'k':
+      return C_TOWER;
+    case 'G':
+      return C_GLASS;
+    case 'Z':
+      return C_NEON;
+    case 'j':
+      return C_BRIDGE;
+    case 'q':
+      return C_QUAY;
+    case 'z':
+      return C_LOT;
     case ',':
       return COMMA;
     case '-':

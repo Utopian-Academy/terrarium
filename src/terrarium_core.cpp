@@ -202,6 +202,25 @@ float displayContrast() {
   return cached;
 }
 
+float terraSeconds() {
+  static auto t0 = std::chrono::steady_clock::now();
+  return std::chrono::duration<float>(std::chrono::steady_clock::now() - t0)
+      .count();
+}
+
+float alienApparition01(const World& w, float seconds) {
+  uint32_t ep = (uint32_t)(seconds / ALIEN_APPARITION_EPOCH);
+  uint32_t hh = hash3(ep, w.worldSeed, 0x8EAD5u);
+  if ((hh % ALIEN_APPARITION_ODDS) != 0u) return 0.f;
+  float age = seconds - (float)ep * ALIEN_APPARITION_EPOCH;
+  if (age >= ALIEN_APPARITION_DWELL) return 0.f;
+  float rise;
+  if (age < 5.f)                                  rise = age / 5.f;
+  else if (age < ALIEN_APPARITION_DWELL - 6.f)    rise = 1.f;
+  else rise = std::max(0.f, (ALIEN_APPARITION_DWELL - age) / 6.f);
+  return rise * rise * (3.f - 2.f * rise);
+}
+
 // Brightness above 1.0 is a LIFT, not a multiply. The old control only ever
 // attenuated: 1.0 meant "don't dim", so max brightness was simply the palette
 // as authored — and since the day/night grade caps output at 0.38 of the
@@ -636,6 +655,78 @@ for(int i=0;i<15;++i) g_modVal[35+i]=clamp01f(odd[i]);
   g_modVal[55] = lw.valid ? clamp01f((lw.temp + 10.f) / 45.f) : 0.5f;
   g_modVal[56] = lw.valid ? clamp01f(lw.windspeed / 40.f) : g_modVal[16];
   g_modVal[57] = (lw.valid && lw.snowing) ? 1.f : 0.f;
+}
+
+// The city, the sea, and the thing that watches. One pass over the world,
+// computed from sim state only (never from renderer state — in the plugin the
+// UI may not be running at all), so a patch behaves the same whether anyone
+// is looking or not.
+{
+  Daylight dl = daylightNow(tick);
+  int built = 0, streets = 0, neon = 0, deep = 0, reef = 0, emissive = 0;
+  long storeys = 0;
+  for (int y = 0; y < H; ++y) {
+    const std::string& row = w.terrain[y];
+    for (int x = 0; x < W; ++x) {
+      char c = row[x];
+      if (isCityBuilding(c)) {
+        ++built;
+        storeys += std::max(0, ((int)w.height[y][x] - CITY_BASE_H) / CITY_STOREY);
+      } else if (c == CITY_ROAD || c == CITY_BRIDGE) {
+        ++streets;
+      } else if (c == CITY_NEON) {
+        ++neon;
+      } else if (c == 'C') {
+        ++reef;
+      }
+      if (w.water[y][x] >= 4) ++deep;
+      // Alien flora that makes its own light.
+      if (w.biome == ALIEN &&
+          (c == 'f' || c == '+' || c == '&' || c == '!' || c == 'm')) ++emissive;
+    }
+  }
+  const float area = (float)(W * H);
+
+  // 58 city_built   how much of the world is building
+  g_modVal[58] = clamp01f((float)built / area * 3.2f);
+  // 59 city_skyline mean storeys of the built stock, 0..~30
+  g_modVal[59] = built ? clamp01f((float)storeys / (float)built / 26.f) : 0.f;
+  // 60 city_neon    signage, and it only counts once it is lit
+  g_modVal[60] = clamp01f((float)neon / area * 26.f) *
+                 clamp01f(1.f - dl.level / 0.6f);
+  // 61 city_streets road and bridge deck
+  g_modVal[61] = clamp01f((float)streets / area * 4.5f);
+  // 62 city_rush    the commute: peaks either side of the day, quiet at
+  //                 3am and quiet at noon
+  {
+    float d = dl.level;
+    float rush = 1.f - std::fabs(d - 0.5f) * 2.f;      // 1 at the twilights
+    g_modVal[62] = clamp01f(rush * (streets ? 1.f : 0.f));
+  }
+  // 63 harbour_boats the ferry is always working; the freighter comes and goes
+  {
+    float secs = terraSeconds();
+    float boats = 0.f;
+    if (w.biome == CITY && streets) {
+      boats = 0.45f;
+      uint32_t ep = (uint32_t)(secs / 200.f);
+      uint32_t hh2 = hash3(ep, w.worldSeed, 0x5417u);
+      float age = secs - (float)ep * 200.f;
+      if ((hh2 % 3u) == 0u && age < 150.f) boats += 0.55f;
+    }
+    g_modVal[63] = clamp01f(boats);
+  }
+  // 64 open_water   how much of the world is deep sea
+  g_modVal[64] = clamp01f((float)deep / area);
+  // 65 reef         coral
+  g_modVal[65] = clamp01f((float)reef / area * 30.f);
+  // 66 apparition   0..1 as it leans in and withdraws (see alienApparition01)
+  g_modVal[66] = (w.biome == ALIEN)
+                     ? clamp01f(alienApparition01(w, terraSeconds()))
+                     : 0.f;
+  // 67 biolum       alien emissive flora, weighted by how dark it has got
+  g_modVal[67] = clamp01f((float)emissive / area * 18.f) *
+                 clamp01f(0.25f + 0.75f * (1.f - dl.level));
 }
 
 for(int i=0;i<MOD_N;++i){
@@ -1382,11 +1473,11 @@ w.biome = biome;
             w.water[y][x] = (uint8_t)(dry && tt > 0.78f ? 0 : (tt > 0.82f ? 1 : 2));
             w.height[y][x] = (uint8_t)(dry ? 150 : 120);
             if (w.water[y][x] == 0) w.terrain[y][x] = r.oneIn(4) ? '.' : 's';
-            else if (r.oneIn(4)) w.terrain[y][x] = 'C';
+            else if (r.oneIn(9)) w.terrain[y][x] = 'C';
           } else if (tt > 0.55f) {                // the lagoon shelf
             w.water[y][x] = 2;
             w.height[y][x] = 110;
-            if (r.oneIn(7)) w.terrain[y][x] = 'C';
+            if (r.oneIn(14)) w.terrain[y][x] = 'C';
           } else {                                // the lagoon itself
             w.water[y][x] = 3;
             w.height[y][x] = 100;

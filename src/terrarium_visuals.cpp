@@ -511,6 +511,37 @@ bool tryColorFloraGlyph(const World& world, char glyph, uint32_t hash,
 
 bool tryColorTerrainGlyph(char glyph, uint32_t hash, RGB& color) {
   switch (glyph) {
+    case 'R':   // asphalt
+      color = pickAndJitter(hash, {{40, 42, 52}, {34, 36, 46}, {48, 50, 60}}, 3);
+      return true;
+    case '_':   // sidewalk
+      color = pickAndJitter(hash, {{92, 90, 98}, {80, 78, 86}, {104, 102, 110}}, 3);
+      return true;
+    case 'q':   // seawall
+      color = pickAndJitter(hash, {{112, 104, 94}, {96, 90, 82}}, 3);
+      return true;
+    case 'j':   // bridge / expressway deck
+      color = pickAndJitter(hash, {{132, 126, 138}, {116, 110, 122}}, 3);
+      return true;
+    case 'z':   // vacant lot
+      color = pickAndJitter(hash, {{78, 72, 62}, {64, 60, 52}}, 3);
+      return true;
+    case 'h': case 'N': case 'k':   // painted metal roofs, as in the vat
+      color = pickAndJitter(hash,
+                            {{48, 122, 178}, {40, 148, 132}, {196, 92, 62},
+                             {214, 168, 58}, {72, 96, 168}, {226, 118, 132},
+                             {232, 158, 120}, {238, 212, 176}, {158, 74, 130},
+                             {96, 186, 196}, {208, 96, 88}},
+                            4);
+      return true;
+    case 'G':   // glazing
+      color = pickAndJitter(hash, {{108, 150, 186}, {92, 132, 168}}, 4);
+      return true;
+    case 'Z':   // signage
+      color = pickPaletteColor(hash, {{236, 60, 150}, {70, 220, 226},
+                                      {255, 156, 60}, {150, 240, 110},
+                                      {240, 84, 80}});
+      return true;
     case 'd':
       color = pickAndJitter(hash,
                             {{110, 70, 42}, {92, 58, 36}, {138, 92, 58},
@@ -718,6 +749,7 @@ RGB fgForChar(const World& world, char c, Season season, float seasonBlend,
 
 void applyDaylight(RGB& color, const Daylight& d) {
   float bright = (0.38f + 0.62f * d.level) * displayBrightness();
+  const float lift = displayLift();
   float w = d.warm;
   float rMul = bright * (1.f + 0.20f * w);
   float gMul = bright * (1.f + 0.04f * std::max(0.f, w));
@@ -725,6 +757,20 @@ void applyDaylight(RGB& color, const Daylight& d) {
   color.r = clampU8((int)(color.r * rMul));
   color.g = clampU8((int)(color.g * gMul));
   color.b = clampU8((int)(color.b * bMul));
+  if (lift > 1.001f) {
+    // Same screen curve the pixel renderer uses, so "max brightness" means
+    // the same thing in both worlds.
+    static float cachedLift = -1.f;
+    static float lut[256];
+    if (cachedLift != lift) {
+      cachedLift = lift;
+      for (int i = 0; i < 256; ++i)
+        lut[i] = 255.f * (1.f - std::pow(1.f - (float)i / 255.f, lift));
+    }
+    color.r = clampU8((int)lut[color.r]);
+    color.g = clampU8((int)lut[color.g]);
+    color.b = clampU8((int)lut[color.b]);
+  }
 }
 
 void applyCloudShadow(RGB& bg, uint8_t cloudVal) {

@@ -35,7 +35,7 @@ inline float pixelviewMote(uint32_t h, float animT, float lifeSec,
 // radially inward; mainland follows the wind. Used by BOTH the deep and
 // the shallows so sets roll continuously from open sea into the break.
 inline float pixelviewSwell(const World& w, int x, int y, float animT,
-                            uint32_t h, float* grpOut) {
+                            uint32_t h, float* grpOut, float* chopOut = nullptr) {
   // A sea current, not a bullseye: one coherent directional flow across
   // the whole ocean (radial island waves read as a clock face). Wind sets
   // the heading; it veers slowly (~10 min) so the sea never goes static.
@@ -45,18 +45,34 @@ inline float pixelviewSwell(const World& w, int x, int y, float animT,
   wa += 0.5f * std::sin(animT * 0.009f);
   float ca = std::cos(wa), sa = std::sin(wa);
   float base = (float)x * ca + (float)y * sa;
-  float ang = 0.13f * ((float)y * ca - (float)x * sa);
-  float s1 = std::sin(0.42f * base + animT * 1.9f +
-                      1.3f * std::sin(ang * 3.f + animT * 0.20f));
-  float s2 = std::sin(0.23f * base + animT * 1.15f +
-                      1.7f * std::sin(ang * 5.f - animT * 0.13f));
-  float s3 = std::sin(0.70f * base + animT * 2.6f + (float)(h & 7u) * 0.22f);
-  float grp = 0.6f + 0.4f * std::sin(0.06f * base + animT * 0.45f +
-                                     0.8f * std::sin(ang * 2.f));
+  float along = (float)y * ca - (float)x * sa;   // along the crest
+  float ang = 0.13f * along;
+
+  // Primary swell: LONG-CRESTED. Real ground swell arrives as coherent lines
+  // that hold across the whole field — the old version modulated crest phase
+  // hard enough (1.3 rad) that the lines broke up into mush at this scale.
+  float s1 = std::sin(0.34f * base + animT * 1.55f +
+                      0.42f * std::sin(ang * 1.3f + animT * 0.13f));
+  // Secondary train, crossing at a slight angle: the interference between two
+  // swells is what stops a sea looking like corrugated iron.
+  float wa2 = wa + 0.42f;
+  float base2 = (float)x * std::cos(wa2) + (float)y * std::sin(wa2);
+  float s2 = std::sin(0.21f * base2 + animT * 1.02f +
+                      0.5f * std::sin(ang * 0.7f - animT * 0.09f));
+  // Chop: short, fast, wind-aligned, and incoherent — the surface texture.
+  float chop = std::sin(1.35f * base + animT * 5.2f + (float)(h & 15u) * 0.41f) *
+               0.6f +
+               std::sin(1.90f * (base * 0.7f + along * 0.7f) - animT * 6.4f +
+                        (float)((h >> 4) & 15u) * 0.37f) * 0.4f;
+
+  // Sets: long groups, so the sea breathes instead of pulsing evenly.
+  float grp = 0.55f + 0.45f * std::sin(0.045f * base + animT * 0.30f +
+                                       0.7f * std::sin(along * 0.02f));
   if (grpOut) *grpOut = grp;
   // Wave energy follows the wind (live mode: the real wind).
   float energy = 0.70f + 0.10f * (float)w.wind.strength;
-  return (0.55f * s1 + 0.30f * s2 + 0.15f * s3) * grp * energy;
+  if (chopOut) *chopOut = chop * (0.35f + 0.65f * energy);
+  return (0.62f * s1 + 0.38f * s2) * grp * energy;
 }
 
 // Island cast (ship, seabirds, whale): positions computed once per frame.
@@ -465,26 +481,22 @@ inline const AlienHead& pixelviewAlienHead(const World& w, float animT) {
   static AlienHead A;
   if (A.t == animT) return A;
   A.t = animT;
-  // Lugia-rare: one epoch in eleven, a quarter-hour apart, for half a minute.
-  // That is about one appearance per three hours the alien world is up —
-  // and it is one voyage stop in nine, so most days you will not see it.
-  const float kEpoch = 900.f, kDwell = 30.f;
+  // Lugia-rare, and the SCHEDULE lives in the core (alienApparition01) so the
+  // mod matrix sees the same event this does — see terrarium_core.hpp. Only
+  // the geometry is decided here.
+  const float kEpoch = ALIEN_APPARITION_EPOCH, kDwell = ALIEN_APPARITION_DWELL;
   uint32_t ep = (uint32_t)(animT / kEpoch);
   uint32_t hh = hash3(ep, w.worldSeed, 0x8EAD5u);
   float age = animT - (float)ep * kEpoch;
-  A.up = ((hh % 11u) == 0u) && age < kDwell;
+  float rise = alienApparition01(w, animT);
+  A.up = rise > 0.f;
 #ifdef TERRA_FORCE_HEAD
-  A.up = true; age = std::fmod(animT, kDwell * 2.f) * 0.5f + 6.f;
+  A.up = true;
+  age = std::fmod(animT, kDwell * 2.f) * 0.5f + 6.f;
+  rise = 1.f;
 #endif
   if (!A.up) return A;
   A.age = age;
-
-  // Rise, hold, withdraw.
-  float rise;
-  if (age < 5.f)                 rise = age / 5.f;
-  else if (age < kDwell - 6.f)   rise = 1.f;
-  else                           rise = std::max(0.f, (kDwell - age) / 6.f);
-  rise = rise * rise * (3.f - 2.f * rise);
   A.rise = rise;
 
   A.side = ((hh >> 20) & 1u) ? 1 : -1;
@@ -719,28 +731,74 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
         r += lift / 2; g += lift; b += lift;
         if (ripple > 0.92f) { r += 50; g += 55; b += 50; }  // whitewater glints
       } else if (!stillBiome && d >= 4) {
-        // Deep ocean: the shared swell field (see pixelviewSwell), crests
-        // sharpened, whitecaps on the strongest sets.
-        float grp;
-        float swell = pixelviewSwell(w, x, y, animT, h, &grp);
-        float crest = swell * std::fabs(swell);  // sharpen up, soften down
-        // The whole wave body carries color (Surf Sandbox bands): troughs
-        // sink toward deep navy, crests lift toward teal...
-        float t01 = crest * 0.5f + 0.5f;
-        r = (int)((float)r * 0.75f + t01 * 26.f);
-        g = (int)((float)g * 0.80f + t01 * 52.f);
-        b = (int)((float)b * 0.85f + t01 * 55.f);
-        // ...an aqua face rides just below each crest...
-        if (crest > 0.25f && crest <= 0.62f) {
-          float f = (crest - 0.25f) / 0.37f * 0.45f;
-          r += (int)(20.f * f); g += (int)(70.f * f); b += (int)(60.f * f);
+        // Deep ocean, Surf Sandbox style: long-crested sets rolling through,
+        // chop texturing the faces, and caps that BREAK — stochastically, for
+        // about half a second, leaving foam that drifts and dies. A fixed
+        // threshold on a smooth field gave permanent white stripes that read
+        // as banding rather than a sea.
+        float grp, chop;
+        float swell = pixelviewSwell(w, x, y, animT, h, &grp, &chop);
+        float crest = swell * std::fabs(swell);   // sharpen up, soften down
+        float surf = crest + 0.22f * chop * (0.5f + 0.5f * grp);
+
+        // Full-body colour, QUANTISED the way Dwarf Fortress animates water:
+        // seven discrete states (its depth 1-7) rather than a smooth ramp. At
+        // one pixel per cell a continuous gradient reads as a flat mottled
+        // field, while stepped bands visibly march across the world — and the
+        // stepping is the animation. Surf Sandbox supplies the wave shape,
+        // DF supplies the way it's drawn.
+        static const uint8_t kSea[12][3] = {
+            {  4,  18,  52},   // abyssal trough
+            {  6,  26,  68},
+            {  9,  36,  86},
+            { 12,  48, 104},
+            { 16,  62, 122},
+            { 20,  78, 140},
+            { 25,  95, 158},
+            { 31, 113, 175},
+            { 38, 133, 190},
+            { 47, 152, 202},
+            { 58, 172, 213},
+            { 74, 194, 222},   // turquoise crest face
+        };
+        // Gain, not smoothstep: easing flattened the mid-range, which is
+        // exactly where most of a wave field lives, so the whole sea sat on
+        // one or two levels. This spreads the body across the ramp and lets
+        // the troughs and faces reach the ends.
+        float t01 = std::clamp(surf * 0.95f + 0.5f, 0.f, 1.f);
+        int lvl = std::clamp((int)(t01 * 11.999f), 0, 11);
+        float shallowLift = (float)(7 - std::min(7, (int)d)) * 3.f;
+        r = (int)((float)kSea[lvl][0] + shallowLift + (float)(j / 3));
+        g = (int)((float)kSea[lvl][1] + shallowLift + (float)(j / 2));
+        b = (int)((float)kSea[lvl][2] + shallowLift * 1.4f + (float)(j / 2));
+
+        // The steep face just under a crest catches the light.
+        if (surf > 0.30f && surf <= 0.70f) {
+          float f = (surf - 0.30f) / 0.40f * 0.40f;
+          r += (int)(26.f * f); g += (int)(64.f * f); b += (int)(52.f * f);
         }
-        // ...and whitecaps top the strongest sets.
-        if (crest > 0.60f) {
-          float f = (crest - 0.60f) / 0.40f * 0.55f;
-          r = (int)(r + (205 - r) * f);
-          g = (int)(g + (222 - g) * f);
-          b = (int)(b + (238 - b) * f);
+        // Breaking: only the biggest crests, only sometimes, and it persists
+        // for a few frames so a cap has a life rather than a threshold.
+        if (surf > 0.52f) {
+          float over = (surf - 0.52f) / 0.48f;
+          uint32_t cellId = hash3((uint32_t)(x / 2), (uint32_t)(y / 2), w.worldSeed);
+          uint32_t epoch = (uint32_t)(animT * 1.7f);
+          uint32_t bh = hash3(cellId, epoch, 0xB2EAu);
+          float life = (animT * 1.7f) - (float)epoch;         // 0..1 through the cap
+          bool breaking = (bh % 100u) < (uint32_t)(18.f + 62.f * over);
+          if (breaking) {
+            float fade = std::sin(3.14159f * std::clamp(life, 0.f, 1.f));
+            float f = std::min(1.f, over * 1.4f) * fade * 0.85f;
+            r = (int)(r + (232 - r) * f);
+            g = (int)(g + (243 - g) * f);
+            b = (int)(b + (250 - b) * f);
+          }
+        }
+        // Spindrift: sparse foam specks blowing off the crests downwind.
+        if (surf > 0.52f) {
+          uint32_t sp = hash3((uint32_t)x, (uint32_t)(y + (int)(animT * 3.f)),
+                              w.worldSeed ^ 0x5D1F7u);
+          if ((sp % 80u) == 0u) { r += 60; g += 66; b += 68; }
         }
       } else if (!stillBiome) {
         // Shallows: the SAME swell field rolls in from the deep (so sets

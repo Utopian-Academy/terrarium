@@ -223,16 +223,20 @@ enum Biome { MEADOW=0, WETLAND=1, ALPINE=2, ALIEN=3, TROPICAL=4, DESERT=5,
 
 
 // ---- City terrain glyphs ----
+// Chosen to be free in the glyph renderer's 8x8 world table AND free of sim
+// meaning: 'A'/'b' already had bitmaps and 'n' is the predator sprite, so
+// road/mid-rise/neon are R/N/Z. Everything refers to these constants, so
+// moving one is a one-line change.
 // The city is a biome like any other: the same water, weather and day/night
 // run over it, and it grows and decays on its own clock. These live in the
 // terrain grid alongside the plants.
-inline constexpr char CITY_ROAD    = 'A';  // asphalt
+inline constexpr char CITY_ROAD    = 'R';  // asphalt
 inline constexpr char CITY_WALK    = '_';  // sidewalk
 inline constexpr char CITY_LOW     = 'h';  // shops / low-rise
-inline constexpr char CITY_MID     = 'b';  // mid-rise block
+inline constexpr char CITY_MID     = 'N';  // mid-rise block
 inline constexpr char CITY_TOWER   = 'k';  // concrete tower
 inline constexpr char CITY_GLASS   = 'G';  // glass tower
-inline constexpr char CITY_NEON    = 'n';  // signage
+inline constexpr char CITY_NEON    = 'Z';  // signage
 inline constexpr char CITY_BRIDGE  = 'j';  // bridge / expressway deck
 inline constexpr char CITY_QUAY    = 'q';  // seawall, dock edge
 inline constexpr char CITY_LOT     = 'z';  // vacant lot / construction
@@ -386,7 +390,7 @@ inline int g_camY = 0;
 inline std::vector<Ripple> g_ripples;
 inline AleaWeights g_alea;
 
-static constexpr int MOD_N = 58;
+static constexpr int MOD_N = 68;
 inline const char* g_modName[MOD_N] = {
   "water_view", "plants_view", "overlay_view", "agents_view", "agent_speed",
   "stress_mean", "stress_hi", "panic_count", "hunger_mean", "thirst_mean",
@@ -401,7 +405,11 @@ inline const char* g_modName[MOD_N] = {
   // World-clock and live-sky sources (day/night, seasons-of-the-real-world,
   // eruptions, actual weather outside the window).
   "daylight", "golden_hour", "rain_strength", "wave_energy",
-  "eruption", "real_temp", "real_wind", "snowing"
+  "eruption", "real_temp", "real_wind", "snowing",
+  // The city, the sea and the thing that watches. Appended, never inserted:
+  // saved patches address slots by index.
+  "city_built", "city_skyline", "city_neon", "city_streets", "city_rush",
+  "harbour_boats", "open_water", "reef", "apparition", "biolum"
 };
 inline float g_modVal[MOD_N] = {0};
 
@@ -507,6 +515,20 @@ float displayBrightness();
 // black — the world floats on an off panel). Reads ~/.terrarium-bg
 // ("earth"/"oled") at most once a second, like displayBrightness().
 int displayBgMode();
+
+// Seconds since the process started (steady clock). The one clock the sim,
+// the renderer and the mod matrix all agree on.
+float terraSeconds();
+
+// The alien apparition's schedule lives here, not in the renderer, because
+// the mod matrix has to know about it too: in the plugin the UI only runs
+// when an editor is open, and a modulation source that reads zero whenever
+// nobody is looking is not a modulation source. Geometry stays in the
+// renderer; this is just "how far out is it, 0..1".
+inline constexpr float ALIEN_APPARITION_EPOCH = 900.f;  // a quarter hour
+inline constexpr float ALIEN_APPARITION_DWELL = 30.f;
+inline constexpr uint32_t ALIEN_APPARITION_ODDS = 11u;  // one epoch in eleven
+float alienApparition01(const World& w, float seconds);
 
 // Brightness above 1.0, from the same ~/.terrarium-brightness file: a screen
 // curve applied at the end of shading (1.0 = off, up to 3.0). displayBrightness
