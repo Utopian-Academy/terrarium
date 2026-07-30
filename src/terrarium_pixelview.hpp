@@ -286,6 +286,123 @@ inline const CityBoats& pixelviewCityBoats(const World& w, float animT) {
   return B;
 }
 
+// ---- Traffic ----
+// Cars are agents, not a pattern. The first version derived them per cell
+// from a closed form (lane parity, phase, speed): that could not turn, could
+// not vary within a lane, and vanished wherever a cell had road on both axes
+// — which is every intersection AND every cell of a three-wide avenue. So
+// they drive now: each car holds a position and a heading, follows the road,
+// picks a way at junctions, and gets rasterised into an occupancy grid once
+// per frame so the per-cell lookup stays O(1).
+struct CityCar {
+  float x = 0.f, y = 0.f;
+  int8_t dx = 1, dy = 0;
+  float speed = 6.f;
+  float wait = 0.f;      // held at a junction
+  uint8_t hue = 0;
+};
+struct CityTraffic {
+  float t = -1e9f;
+  uint32_t seed = 0xFFFFFFFFu;
+  std::vector<CityCar> cars;
+  std::vector<uint8_t> cell;   // 0 empty, else 1 + car index (capped)
+  std::vector<uint8_t> dirOf;  // 0 none, 1 = heading +, 2 = heading -
+};
+
+inline bool pixelviewIsRoad(const World& w, int x, int y) {
+  if (!inBounds(x, y)) return false;
+  char c = w.terrain[y][x];
+  return c == CITY_ROAD || c == CITY_BRIDGE;
+}
+
+inline const CityTraffic& pixelviewTraffic(const World& w, float animT) {
+  static CityTraffic slot[2];
+  static int rr2 = 0;
+  CityTraffic* T = nullptr;
+  for (int i = 0; i < 2; ++i) if (slot[i].seed == w.worldSeed) T = &slot[i];
+  if (!T) { T = &slot[rr2]; rr2 ^= 1; *T = CityTraffic{}; T->seed = w.worldSeed; }
+  if (T->t == animT) return *T;
+
+  float dt = (T->t < -1e8f) ? 0.f : std::min(0.35f, animT - T->t);
+  bool first = T->cars.empty();
+  T->t = animT;
+  if (T->cell.empty()) { T->cell.assign((size_t)W * H, 0); T->dirOf.assign((size_t)W * H, 0); }
+
+  uint32_t rs = w.worldSeed ^ 0x7A4F1Cu;
+  auto rnd = [&]() { rs ^= rs << 13; rs ^= rs >> 17; rs ^= rs << 5; return rs; };
+
+  if (first) {
+    int want = std::max(8, (W * H) / 620);
+    for (int tries = 0; tries < want * 60 && (int)T->cars.size() < want; ++tries) {
+      int x = (int)(rnd() % (uint32_t)W), y = (int)(rnd() % (uint32_t)H);
+      if (!pixelviewIsRoad(w, x, y)) continue;
+      // A heading the road actually goes in.
+      const int dxs[4] = {1, -1, 0, 0}, dys[4] = {0, 0, 1, -1};
+      int pick = -1;
+      for (int k = 0; k < 4; ++k) {
+        int kk = (int)((rnd() + (uint32_t)k) % 4u);
+        if (pixelviewIsRoad(w, x + dxs[kk], y + dys[kk])) { pick = kk; break; }
+      }
+      if (pick < 0) continue;
+      CityCar c;
+      c.x = (float)x + 0.5f; c.y = (float)y + 0.5f;
+      c.dx = (int8_t)dxs[pick]; c.dy = (int8_t)dys[pick];
+      c.speed = 3.2f + (float)(rnd() % 1000u) * 0.0075f;   // 3.2 .. 10.7 cells/s
+      c.hue = (uint8_t)(rnd() & 255u);
+      T->cars.push_back(c);
+    }
+  }
+
+  std::fill(T->cell.begin(), T->cell.end(), (uint8_t)0);
+  std::fill(T->dirOf.begin(), T->dirOf.end(), (uint8_t)0);
+
+  for (size_t i = 0; i < T->cars.size(); ++i) {
+    CityCar& c = T->cars[i];
+    if (c.wait > 0.f) {
+      c.wait -= dt;
+    } else {
+      int cx = (int)c.x, cy = (int)c.y;
+      float step = c.speed * dt;
+      // Advance in short hops so a fast car cannot tunnel through a junction.
+      while (step > 0.f) {
+        float hop = std::min(step, 0.45f);
+        step -= hop;
+        c.x += (float)c.dx * hop;
+        c.y += (float)c.dy * hop;
+        int nx = (int)c.x, ny = (int)c.y;
+        if (nx == cx && ny == cy) continue;
+        cx = nx; cy = ny;
+        // Entered a new cell: is there still road ahead, and is this a junction?
+        bool ahead = pixelviewIsRoad(w, nx + c.dx, ny + c.dy);
+        int lx = -c.dy, ly = c.dx;                  // the two perpendiculars
+        bool left = pixelviewIsRoad(w, nx + lx, ny + ly);
+        bool right = pixelviewIsRoad(w, nx - lx, ny - ly);
+        bool junction = (left || right);
+        uint32_t roll = rnd();
+        if (!ahead || (junction && (roll % 100u) < 16u)) {
+          // Turn. Prefer a turn that exists; if the road dead-ends, come about.
+          bool goLeft = left && (!right || (roll & 0x100u));
+          if (goLeft)       { c.dx = (int8_t)lx; c.dy = (int8_t)ly; }
+          else if (right)   { c.dx = (int8_t)-lx; c.dy = (int8_t)-ly; }
+          else if (!ahead)  { c.dx = (int8_t)-c.dx; c.dy = (int8_t)-c.dy; }
+          c.x = (float)nx + 0.5f; c.y = (float)ny + 0.5f;
+          if ((roll >> 12) % 5u == 0u) c.wait = 0.25f + (float)((roll >> 16) % 90u) * 0.01f;
+          break;
+        }
+        if (!pixelviewIsRoad(w, nx, ny)) {          // shoved off the network
+          c.dx = (int8_t)-c.dx; c.dy = (int8_t)-c.dy;
+          c.x = (float)cx + 0.5f; c.y = (float)cy + 0.5f;
+          break;
+        }
+      }
+    }
+    int ix = std::clamp((int)c.x, 0, W - 1), iy = std::clamp((int)c.y, 0, H - 1);
+    T->cell[(size_t)iy * W + ix] = (uint8_t)(1u + (i & 0x7Fu));
+    T->dirOf[(size_t)iy * W + ix] = (uint8_t)((c.dx + c.dy > 0) ? 1u : 2u);
+  }
+  return *T;
+}
+
 // Roof palette. Seen from above a city is roofs, not facades: tar and
 // gravel, painted membrane, rusted steel, weathered copper — with the pastel
 // plaster only showing on the parapets that catch the light.
@@ -323,6 +440,76 @@ inline bool pixelviewSameBuilding(const World& w, int x, int y, int nx, int ny) 
   if (!inBounds(nx, ny)) return false;
   if (!isCityBuilding(w.terrain[ny][nx])) return false;
   return w.height[ny][nx] == w.height[y][x];
+}
+
+// ---- The thing in the alien world that notices you ----
+// Rarely, something very large rises at the edge of the world, looks slowly
+// around, and goes back down. It reads as a silhouette — the world dims and
+// hazes behind it — and only the eyes are lit, which is what makes it
+// unpleasant. Same schedule-by-epoch trick as the whale and the serpent.
+struct AlienHead {
+  float t = -1e9f;
+  bool up = false;
+  int side = -1;                 // -1 leans in from the left rim, +1 the right
+  float cx = 0.f, cy = 0.f;      // centre of the cranium, in cells
+  float rx = 1.f, ry = 1.f;
+  float tilt = 0.f;              // head cocked toward the middle
+  float rise = 0.f;              // 0 hidden .. 1 fully leaning in
+  float gaze = 0.f;              // -1 .. +1, where it is looking
+  float blink = 1.f;             // 1 open, 0 shut
+  float handX = 0.f, handY = 0.f;  // the hand that holds the rim
+  float age = 0.f;
+};
+
+inline const AlienHead& pixelviewAlienHead(const World& w, float animT) {
+  static AlienHead A;
+  if (A.t == animT) return A;
+  A.t = animT;
+  const float kEpoch = 240.f, kDwell = 26.f;
+  uint32_t ep = (uint32_t)(animT / kEpoch);
+  uint32_t hh = hash3(ep, w.worldSeed, 0x8EAD5u);
+  float age = animT - (float)ep * kEpoch;
+  A.up = ((hh % 3u) == 0u) && age < kDwell;
+#ifdef TERRA_FORCE_HEAD
+  A.up = true; age = std::fmod(animT, kDwell * 2.f) * 0.5f + 6.f;
+#endif
+  if (!A.up) return A;
+  A.age = age;
+
+  // Rise, hold, withdraw.
+  float rise;
+  if (age < 5.f)                 rise = age / 5.f;
+  else if (age < kDwell - 6.f)   rise = 1.f;
+  else                           rise = std::max(0.f, (kDwell - age) / 6.f);
+  rise = rise * rise * (3.f - 2.f * rise);
+  A.rise = rise;
+
+  A.side = ((hh >> 20) & 1u) ? 1 : -1;
+  A.rx = (float)W * (0.15f + 0.04f * (float)((hh >> 4) & 15u) / 15.f);
+  A.ry = A.rx * 1.35f;
+  // It leans in around the rim: off the panel entirely when hidden, head and
+  // one shoulder inside the circle when fully out, the rest of it still
+  // beyond the edge (the circle mask does the cropping for us).
+  float inX  = (float)W * (A.side < 0 ? 0.26f : 0.74f);
+  float outX = (A.side < 0) ? -A.rx * 1.6f : (float)W + A.rx * 1.6f;
+  A.cx = outX + (inX - outX) * rise;
+  A.cy = (float)H * (0.40f + 0.03f * std::sin(age * 0.35f));   // it shifts a little
+  A.tilt = (float)-A.side * 0.26f * rise;                      // cocked inward
+  // A hand comes round the rim below the head to steady itself.
+  {
+    float cc = (float)W * 0.5f - 0.5f, R = (float)W * 0.5f;
+    float baseAng = (A.side < 0) ? 3.14159f : 0.f;
+    float ang = baseAng + (float)-A.side * (0.62f + 0.06f * std::sin(age * 0.5f));
+    float rr3 = R * (0.995f - 0.16f * rise);
+    A.handX = cc + rr3 * std::cos(ang);
+    A.handY = cc + rr3 * std::sin(ang);
+  }
+
+  // It looks around in long sweeps, with the odd slow blink.
+  A.gaze = std::sin(age * 0.42f) * 0.75f + 0.25f * std::sin(age * 0.17f + 1.3f);
+  float bph = std::sin(age * 0.9f + (float)(hh & 31u));
+  A.blink = (bph > 0.972f) ? 0.12f : 1.f;
+  return A;
 }
 
 // ---------------------------------------------------------------------
@@ -1008,49 +1195,43 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
       }
     }
 
-    // Traffic. Lanes alternate direction, each with its own spacing and
-    // speed, so the streams read as flow rather than a marching pattern.
+    // Traffic: driven agents, looked up from this frame's occupancy grid.
     if (t == CITY_ROAD || t == CITY_BRIDGE) {
-      bool horiz = (x > 0 && (w.terrain[y][x-1] == t)) ||
-                   (x < W - 1 && (w.terrain[y][x+1] == t));
-      bool vert  = (y > 0 && (w.terrain[y-1][x] == t)) ||
-                   (y < H - 1 && (w.terrain[y+1][x] == t));
-      if (horiz != vert) {                       // never at a junction
-        int lane = horiz ? y : x;
-        float dir = (lane & 1) ? 1.f : -1.f;
-        float s = horiz ? fx : fy;
-        uint32_t lh = hash3((uint32_t)lane, w.worldSeed, 0x7A4F1Cu);
-        bool quiet = (night > 0.7f) && ((lh % 3u) == 0u);   // small hours
-        if (!quiet) {
-          float spacing = 9.f + (float)(lh % 15u);
-          float speed = 5.0f + (float)((lh >> 5) % 8u);
-          float u = (s - dir * speed * animT) / spacing +
-                    (float)(lh % 100u) * 0.01f;
-          float cell = std::floor(u);
-          float f = u - cell;
-          if (f < 1.5f / spacing) {
-            uint32_t ch = hash3((uint32_t)lane, (uint32_t)(int)cell, w.worldSeed);
-            float p = br;
-            if (night > 0.35f) {
-              // Headlights coming, tail lights going.
-              bool coming = (dir > 0.f) == (horiz ? true : true);
-              if (((ch >> 3) & 1u) ^ (coming ? 0u : 1u)) {
-                rr = 255.f * p; gg = 240.f * p; bb = 205.f * p;
-              } else {
-                rr = 235.f * p; gg = 60.f * p; bb = 45.f * p;
-              }
-            } else {
-              switch (ch % 6u) {                 // daylight paintwork
-                case 0:  rr = 220.f; gg = 225.f; bb = 230.f; break;
-                case 1:  rr = 40.f;  gg = 44.f;  bb = 52.f;  break;
-                case 2:  rr = 190.f; gg = 60.f;  bb = 55.f;  break;
-                case 3:  rr = 70.f;  gg = 110.f; bb = 180.f; break;
-                case 4:  rr = 200.f; gg = 190.f; bb = 90.f;  break;
-                default: rr = 120.f; gg = 130.f; bb = 135.f; break;
-              }
-              rr *= br; gg *= br; bb *= br;
-            }
+      const CityTraffic& T = pixelviewTraffic(w, animT);
+      uint8_t occ = T.cell[(size_t)y * W + x];
+      if (occ) {
+        uint32_t ch = hash3((uint32_t)occ, w.worldSeed, 0xCA25u);
+        bool heading = (T.dirOf[(size_t)y * W + x] == 1u);
+        uint32_t kind = ch % 100u;
+        if (night > 0.35f) {
+          // Lamps, not paintwork: what you see of a car at night.
+          if (kind < 4u) {                       // emergency, running blue
+            float f = std::sin(animT * 9.f + (float)(ch & 31u)) > 0.f ? 1.f : 0.25f;
+            rr = 60.f * br * f; gg = 110.f * br * f; bb = 255.f * br * f;
+          } else if (kind < 12u) {               // a taxi's roof sign
+            rr = 255.f * br; gg = 196.f * br; bb = 70.f * br;
+          } else if (heading) {
+            if (kind < 56u) { rr = 255.f * br; gg = 238.f * br; bb = 200.f * br; }
+            else            { rr = 226.f * br; gg = 238.f * br; bb = 255.f * br; }  // xenon
+          } else {
+            if (kind < 60u) { rr = 240.f * br; gg = 52.f * br;  bb = 40.f * br; }
+            else            { rr = 245.f * br; gg = 120.f * br; bb = 40.f * br; }   // amber
           }
+        } else {
+          switch (kind % 11u) {                  // daylight paintwork
+            case 0:  rr = 232.f; gg = 236.f; bb = 240.f; break;  // white
+            case 1:  rr = 44.f;  gg = 46.f;  bb = 54.f;  break;  // black
+            case 2:  rr = 198.f; gg = 58.f;  bb = 52.f;  break;  // red
+            case 3:  rr = 62.f;  gg = 104.f; bb = 188.f; break;  // blue
+            case 4:  rr = 246.f; gg = 202.f; bb = 58.f;  break;  // taxi yellow
+            case 5:  rr = 132.f; gg = 140.f; bb = 146.f; break;  // silver
+            case 6:  rr = 54.f;  gg = 132.f; bb = 96.f;  break;  // green
+            case 7:  rr = 236.f; gg = 138.f; bb = 62.f;  break;  // orange bus
+            case 8:  rr = 88.f;  gg = 176.f; bb = 186.f; break;  // teal
+            case 9:  rr = 176.f; gg = 84.f;  bb = 152.f; break;  // plum
+            default: rr = 214.f; gg = 208.f; bb = 190.f; break;  // cream van
+          }
+          rr *= br; gg *= br; bb *= br;
         }
       }
     }
@@ -1234,6 +1415,116 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
       if (band > 0.92f) {
         float p = (band - 0.92f) / 0.08f * 0.22f * br;
         rr += 40.f * p; gg += 150.f * p; bb += 130.f * p;
+      }
+    }
+
+    // ...and, rarely, something leans in around the edge of the world to see
+    // what is in here. The circle mask crops whatever is still outside the
+    // rim, which is what sells it as peering round a corner.
+    const AlienHead& A = pixelviewAlienHead(w, animT);
+    if (A.up && A.rise > 0.01f) {
+      const float fxx = (float)x, fyy = (float)y;
+      // Cheap reject: everything below is confined to this box.
+      float bx0 = std::min(A.cx, A.handX) - A.rx * 2.6f;
+      float bx1 = std::max(A.cx, A.handX) + A.rx * 2.6f;
+      float by0 = A.cy - A.ry * 1.8f;
+      float by1 = std::max(A.cy + A.ry * 3.4f, A.handY + A.rx * 1.2f);
+      if (fxx > bx0 && fxx < bx1 && fyy > by0 && fyy < by1) {
+        auto ellipse = [&](float cx2, float cy2, float rx2, float ry2, float rot) {
+          float dx2 = fxx - cx2, dy2 = fyy - cy2;
+          float c = std::cos(rot), s2 = std::sin(rot);
+          float a2 = dx2 * c + dy2 * s2, b2 = -dx2 * s2 + dy2 * c;
+          return (a2 * a2) / (rx2 * rx2) + (b2 * b2) / (ry2 * ry2);
+        };
+        auto capsule = [&](float x0, float y0, float x1, float y1, float rad) {
+          float vx = x1 - x0, vy = y1 - y0;
+          float len2 = vx * vx + vy * vy;
+          float tt = (len2 > 0.f) ? ((fxx - x0) * vx + (fyy - y0) * vy) / len2 : 0.f;
+          tt = std::clamp(tt, 0.f, 1.f);
+          float px2 = x0 + vx * tt - fxx, py2 = y0 + vy * tt - fyy;
+          return (px2 * px2 + py2 * py2) / (rad * rad);
+        };
+
+        // --- head, in its own tilted frame ---
+        float ct = std::cos(A.tilt), st = std::sin(A.tilt);
+        float hx = (fxx - A.cx) * ct + (fyy - A.cy) * st;
+        float hy = -(fxx - A.cx) * st + (fyy - A.cy) * ct;
+        float v = hy / A.ry;
+        float taper = 1.f - 0.62f * std::max(0.f, v);
+        float u = hx / (A.rx * std::max(0.18f, taper));
+        float dHead = u * u + v * v;
+
+        // --- shoulder / torso, still mostly beyond the rim ---
+        float shX = A.cx - (float)A.side * A.rx * 0.85f;
+        float shY = A.cy + A.ry * 1.30f;
+        float dBody = ellipse(shX, shY, A.rx * 1.75f, A.ry * 1.15f,
+                              (float)-A.side * 0.35f);
+        // --- neck ---
+        float dNeck = capsule(A.cx, A.cy + A.ry * 0.72f, shX, shY, A.rx * 0.30f);
+        // --- arm reaching along the rim to the hand ---
+        float elbowX = (shX + A.handX) * 0.5f + (float)A.side * A.rx * 0.30f;
+        float elbowY = (shY + A.handY) * 0.5f + A.ry * 0.55f;
+        float dArm = std::min(capsule(shX, shY, elbowX, elbowY, A.rx * 0.24f),
+                              capsule(elbowX, elbowY, A.handX, A.handY, A.rx * 0.19f));
+        // --- hand: palm plus long fingers curling in over the edge ---
+        float inwX = (float)W * 0.5f - A.handX, inwY = (float)H * 0.5f - A.handY;
+        float inwL = std::sqrt(inwX * inwX + inwY * inwY);
+        if (inwL > 0.001f) { inwX /= inwL; inwY /= inwL; }
+        float tanX = -inwY, tanY = inwX;
+        float dHand = ellipse(A.handX, A.handY, A.rx * 0.34f, A.rx * 0.26f, 0.f);
+        for (int fgr = 0; fgr < 4; ++fgr) {
+          float off = ((float)fgr - 1.5f) * A.rx * 0.17f;
+          float bxf = A.handX + tanX * off, byf = A.handY + tanY * off;
+          float tipLen = A.rx * (0.52f - 0.06f * std::fabs((float)fgr - 1.5f));
+          float txf = bxf + inwX * tipLen, tyf = byf + inwY * tipLen;
+          dHand = std::min(dHand, capsule(bxf, byf, txf, tyf, A.rx * 0.072f));
+        }
+
+        // Head only, for now. A full figure (shoulder, arm, a hand round the
+        // rim) is computed above but reads as one huge blob at this scale:
+        // the torso lands well inside the circle instead of being cropped by
+        // it. Left in place, out of the silhouette, until it earns its keep.
+        (void)dBody; (void)dNeck; (void)dArm; (void)dHand;
+        float dAny = dHead;
+
+        // Atmosphere: it displaces the air it leans through.
+        if (dAny >= 1.f && dAny < 2.0f) {
+          float haze = (1.f - (dAny - 1.f) / 1.0f) * 0.32f * A.rise;
+          rr = rr * (1.f - haze) + 26.f * haze;
+          gg = gg * (1.f - haze) + 30.f * haze;
+          bb = bb * (1.f - haze) + 44.f * haze;
+        }
+        if (dAny < 1.f) {
+          // Near-black, with a faint rim where the world's glow catches it.
+          float rim = std::max(0.f, (dAny - 0.70f) / 0.30f);
+          float bR = 12.f + 42.f * rim, bG = 14.f + 50.f * rim, bB = 22.f + 70.f * rim;
+          rr = rr * (1.f - A.rise) + bR * A.rise;
+          gg = gg * (1.f - A.rise) + bG * A.rise;
+          bb = bb * (1.f - A.rise) + bB * A.rise;
+        }
+
+        // Eyes last, so nothing paints over them.
+        if (dHead < 1.2f) {
+          for (int sd = -1; sd <= 1; sd += 2) {
+            float ex = (0.44f * (float)sd + A.gaze * 0.10f) * A.rx;
+            float ey = -0.10f * A.ry;
+            float dx2 = hx - ex, dy2 = hy - ey;
+            float sl = 0.42f * (float)sd;
+            float rxq = dx2 * std::cos(sl) - dy2 * std::sin(sl);
+            float ryq = dx2 * std::sin(sl) + dy2 * std::cos(sl);
+            float exr = A.rx * 0.30f, eyr = A.ry * 0.13f * A.blink;
+            float q = (rxq * rxq) / (exr * exr) + (ryq * ryq) / (eyr * eyr);
+            if (q < 1.f) {
+              float core = 1.f - q;
+              float pulse = 0.72f + 0.28f * std::sin(animT * 2.1f);
+              float p = A.rise * pulse * br * (0.35f + 0.65f * core);
+              rr = rr * (1.f - p) + 120.f * p;
+              gg = gg * (1.f - p) + 246.f * p;
+              bb = bb * (1.f - p) + 238.f * p;
+              if (q < 0.22f) { rr += 60.f * p; gg += 20.f * p; bb += 40.f * p; }
+            }
+          }
+        }
       }
     }
   }
@@ -1478,6 +1769,24 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
   // invisible at 1px/cell — the whole sky flickering sells the storm).
   if (w.weather.state == STORM && (hash3((uint32_t)tick, 99u, 7u) % 19u) == 0u) {
     rr = rr * 1.5f + 70.f; gg = gg * 1.5f + 70.f; bb = bb * 1.4f + 60.f;
+  }
+
+  // Brightness lift (live). A 256-entry table, rebuilt only when the setting
+  // moves, keeps this off the per-cell pow() path — it runs on a Pi Zero.
+  {
+    float lift = displayLift();
+    if (lift > 1.001f) {
+      static float cachedLift = -1.f;
+      static float lut[256];
+      if (cachedLift != lift) {
+        cachedLift = lift;
+        for (int i = 0; i < 256; ++i)
+          lut[i] = 255.f * (1.f - std::pow(1.f - (float)i / 255.f, lift));
+      }
+      rr = lut[clampU8((int)rr)];
+      gg = lut[clampU8((int)gg)];
+      bb = lut[clampU8((int)bb)];
+    }
   }
 
   // User contrast (live, from the kiosk remote).

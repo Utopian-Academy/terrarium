@@ -202,6 +202,30 @@ float displayContrast() {
   return cached;
 }
 
+// Brightness above 1.0 is a LIFT, not a multiply. The old control only ever
+// attenuated: 1.0 meant "don't dim", so max brightness was simply the palette
+// as authored — and since the day/night grade caps output at 0.38 of the
+// palette at night, max never felt like max on the panel after dark. Values
+// above 1.0 now apply a screen curve (1-(1-v)^k), which lifts the darks and
+// midtones hard while leaving white at white, so nothing clips.
+float displayLift() {
+  static float cached = 1.0f;
+  static std::chrono::steady_clock::time_point lastRead{};
+  auto now = std::chrono::steady_clock::now();
+  if (now - lastRead < std::chrono::seconds(1)) return cached;
+  lastRead = now;
+  const char* home = std::getenv("HOME");
+  if (!home) return cached;
+  std::string path = std::string(home) + "/.terrarium-brightness";
+  cached = 1.0f;
+  if (FILE* f = std::fopen(path.c_str(), "r")) {
+    float v = 1.0f;
+    if (std::fscanf(f, "%f", &v) == 1 && v > 1.0f) cached = std::min(v, 3.0f);
+    std::fclose(f);
+  }
+  return cached;
+}
+
 // Panel geometry, live from ~/.terrarium-panel ("<diameter> <x> <y>").
 // The round LED disc's true diameter was never on a spec sheet, and the
 // output lands at whatever offset the panel's controller crops from — so

@@ -508,6 +508,11 @@ float displayBrightness();
 // ("earth"/"oled") at most once a second, like displayBrightness().
 int displayBgMode();
 
+// Brightness above 1.0, from the same ~/.terrarium-brightness file: a screen
+// curve applied at the end of shading (1.0 = off, up to 3.0). displayBrightness
+// still only attenuates, so every existing call site is unchanged.
+float displayLift();
+
 // Display contrast 0.5..1.8 around mid-grey, live via ~/.terrarium-contrast
 // (same polling pattern as brightness). Missing file = 1.0.
 float displayContrast();
