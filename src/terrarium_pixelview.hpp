@@ -419,6 +419,103 @@ inline const CityTraffic& pixelviewTraffic(const World& w, float animT) {
   return *T;
 }
 
+// ---- Marine life ----
+// The sim's own fish are capped for a pond, so an ocean read as empty water.
+// Shoals are drawn instead: a handful of schools, each a cloud of fish that
+// swims as one body, wheels, and scatters when something big goes past. Same
+// trick as the traffic — integrate a few dozen agents, rasterise once per
+// frame, keep the per-cell lookup O(1).
+struct Shoal {
+  float cx = 0.f, cy = 0.f;      // the school's centre
+  float hx = 1.f, hy = 0.f;      // heading
+  float speed = 2.2f;
+  int n = 0;
+  float ox[42], oy[42];          // each fish's offset within the school
+  float phase[42];
+  uint8_t kind = 0;              // 0 sardine, 1 reef fish, 2 ray/turtle
+};
+struct MarineLife {
+  float t = -1e9f;
+  uint32_t seed = 0xFFFFFFFFu;
+  std::vector<Shoal> shoals;
+  std::vector<uint8_t> cell;     // 0 none, else 1+kind
+};
+
+inline const MarineLife& pixelviewMarine(const World& w, float animT) {
+  static MarineLife slot[2];
+  static int rr3 = 0;
+  MarineLife* M = nullptr;
+  for (int i = 0; i < 2; ++i) if (slot[i].seed == w.worldSeed) M = &slot[i];
+  if (!M) { M = &slot[rr3]; rr3 ^= 1; *M = MarineLife{}; M->seed = w.worldSeed; }
+  if (M->t == animT) return *M;
+  float dt = (M->t < -1e8f) ? 0.f : std::min(0.35f, animT - M->t);
+  bool first = M->shoals.empty();
+  M->t = animT;
+  if (M->cell.empty()) M->cell.assign((size_t)W * H, 0);
+
+  uint32_t rs = w.worldSeed ^ 0xF15Au;
+  auto rnd = [&]() { rs ^= rs << 13; rs ^= rs >> 17; rs ^= rs << 5; return rs; };
+
+  auto wet = [&](float fx2, float fy2) {
+    int xi = (int)fx2, yi = (int)fy2;
+    return inBounds(xi, yi) && w.water[yi][xi] > 0;
+  };
+
+  if (first) {
+    int want = std::max(4, (W * H) / 1500);
+    for (int tries = 0; tries < want * 80 && (int)M->shoals.size() < want; ++tries) {
+      int x = (int)(rnd() % (uint32_t)W), y = (int)(rnd() % (uint32_t)H);
+      if (!inBounds(x, y) || w.water[y][x] < 2) continue;
+      Shoal s;
+      s.cx = (float)x; s.cy = (float)y;
+      float a = (float)(rnd() % 628u) * 0.01f;
+      s.hx = std::cos(a); s.hy = std::sin(a);
+      s.kind = (uint8_t)(rnd() % 10u < 6u ? 0 : (rnd() % 2u ? 1 : 2));
+      s.speed = (s.kind == 2) ? 0.9f : 1.8f + (float)(rnd() % 100u) * 0.02f;
+      s.n = (s.kind == 2) ? 1 + (int)(rnd() % 2u)
+                          : 14 + (int)(rnd() % 26u);
+      float spread = (s.kind == 0) ? 2.6f : 2.0f;
+      for (int i = 0; i < s.n; ++i) {
+        s.ox[i] = ((float)(rnd() % 1000u) / 500.f - 1.f) * spread;
+        s.oy[i] = ((float)(rnd() % 1000u) / 500.f - 1.f) * spread * 0.7f;
+        s.phase[i] = (float)(rnd() % 628u) * 0.01f;
+      }
+      M->shoals.push_back(s);
+    }
+  }
+
+  std::fill(M->cell.begin(), M->cell.end(), (uint8_t)0);
+  for (auto& s : M->shoals) {
+    // Wander, and turn away from land before hitting it.
+    float turn = 0.35f * std::sin(animT * 0.23f + s.phase[0]);
+    float ahead = 3.5f;
+    if (!wet(s.cx + s.hx * ahead, s.cy + s.hy * ahead)) turn += 2.2f;
+    float ca = std::cos(turn * dt), sa2 = std::sin(turn * dt);
+    float nhx = s.hx * ca - s.hy * sa2, nhy = s.hx * sa2 + s.hy * ca;
+    s.hx = nhx; s.hy = nhy;
+    s.cx += s.hx * s.speed * dt;
+    s.cy += s.hy * s.speed * dt;
+    // Wrap rather than pile up on a coast.
+    if (s.cx < 1.f) s.cx = (float)W - 2.f;
+    if (s.cx > (float)W - 1.f) s.cx = 1.f;
+    if (s.cy < 1.f) s.cy = (float)H - 2.f;
+    if (s.cy > (float)H - 1.f) s.cy = 1.f;
+
+    float px2 = -s.hy, py2 = s.hx;   // the school's own axes
+    for (int i = 0; i < s.n; ++i) {
+      // Each fish weaves within the body of the school.
+      float wob = 0.5f * std::sin(animT * 3.1f + s.phase[i]);
+      float ax = s.ox[i] + wob * 0.35f, ay = s.oy[i] + wob;
+      float fx2 = s.cx + s.hx * ax + px2 * ay;
+      float fy2 = s.cy + s.hy * ax + py2 * ay;
+      int xi = (int)fx2, yi = (int)fy2;
+      if (!inBounds(xi, yi) || w.water[yi][xi] == 0) continue;
+      M->cell[(size_t)yi * W + xi] = (uint8_t)(1u + s.kind);
+    }
+  }
+  return *M;
+}
+
 // Roof palette. Seen from above a city is roofs, not facades: tar and
 // gravel, painted membrane, rusted steel, weathered copper — with the pastel
 // plaster only showing on the parapets that catch the light.
@@ -730,113 +827,118 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
         int lift = (int)(ripple * 14.f);
         r += lift / 2; g += lift; b += lift;
         if (ripple > 0.92f) { r += 50; g += 55; b += 50; }  // whitewater glints
-      } else if (!stillBiome && d >= 4) {
-        // Deep ocean, Surf Sandbox style: long-crested sets rolling through,
-        // chop texturing the faces, and caps that BREAK — stochastically, for
-        // about half a second, leaving foam that drifts and dies. A fixed
-        // threshold on a smooth field gave permanent white stripes that read
-        // as banding rather than a sea.
+      } else if (!stillBiome) {
+        // One wave model for the whole sea, depth-aware — because the thing
+        // that makes water read as water is a wave SHOALING: the same swell
+        // that rolls unbroken through deep water feels the bottom as it
+        // comes in, steepens, and breaks against the reef or the beach.
+        // Previously the deep and the shallows ran different maths, so big
+        // bands marched across open water and never broke on anything.
         float grp, chop;
         float swell = pixelviewSwell(w, x, y, animT, h, &grp, &chop);
-        float crest = swell * std::fabs(swell);   // sharpen up, soften down
-        float surf = crest + 0.22f * chop * (0.5f + 0.5f * grp);
 
-        // Full-body colour, QUANTISED the way Dwarf Fortress animates water:
-        // seven discrete states (its depth 1-7) rather than a smooth ramp. At
-        // one pixel per cell a continuous gradient reads as a flat mottled
-        // field, while stepped bands visibly march across the world — and the
-        // stepping is the animation. Surf Sandbox supplies the wave shape,
-        // DF supplies the way it's drawn.
+        // How much this cell feels the bottom: 0 in the deep, 1 in the surf.
+        float shoal = std::clamp((5.f - (float)d) / 4.f, 0.f, 1.f);
+        int landNear = 0;
+        for (int oy = -2; oy <= 2; ++oy)
+          for (int ox = -2; ox <= 2; ++ox) {
+            int nx2 = x + ox, ny2 = y + oy;
+            if (nx2 < 0 || ny2 < 0 || nx2 >= W || ny2 >= H) continue;
+            if (w.water[ny2][nx2] == 0) ++landNear;
+          }
+        float shore = std::clamp((float)landNear / 6.f, 0.f, 1.f);
+        shoal = std::max(shoal, shore * 0.9f);
+
+        // Steepening: amplitude grows and the face sharpens as it shallows.
+        float crest = swell * std::fabs(swell);
+        float amp = 0.42f + 1.45f * shoal;
+        float surf = crest * amp + chop * (0.20f - 0.13f * shoal);
+
+        // Body colour: DF-style discrete states, paling as the water thins.
         static const uint8_t kSea[12][3] = {
-            {  4,  18,  52},   // abyssal trough
-            {  6,  26,  68},
-            {  9,  36,  86},
-            { 12,  48, 104},
-            { 16,  62, 122},
-            { 20,  78, 140},
-            { 25,  95, 158},
-            { 31, 113, 175},
-            { 38, 133, 190},
-            { 47, 152, 202},
-            { 58, 172, 213},
-            { 74, 194, 222},   // turquoise crest face
+            {  4,  18,  52}, {  6,  26,  68}, {  9,  36,  86}, { 12,  48, 104},
+            { 16,  62, 122}, { 20,  78, 140}, { 25,  95, 158}, { 31, 113, 175},
+            { 38, 133, 190}, { 47, 152, 202}, { 58, 172, 213}, { 74, 194, 222},
         };
-        // Gain, not smoothstep: easing flattened the mid-range, which is
-        // exactly where most of a wave field lives, so the whole sea sat on
-        // one or two levels. This spreads the body across the ramp and lets
-        // the troughs and faces reach the ends.
-        float t01 = std::clamp(surf * 0.95f + 0.5f, 0.f, 1.f);
+        // Offshore the swell is very nearly INVISIBLE as colour. Big coherent
+        // bands rolling across open water are the single most immersion-
+        // breaking thing this renderer did: from above, deep ocean is texture
+        // and glitter, and the only place a wave becomes a shape you can see
+        // is where it feels the bottom. So the swell still drives everything —
+        // where the sets are, when things break — but offshore it barely
+        // touches the body colour at all.
+        float gain = 0.10f + 1.05f * shoal;
+        float t01 = std::clamp(surf * gain + 0.5f, 0.f, 1.f);
         int lvl = std::clamp((int)(t01 * 11.999f), 0, 11);
-        float shallowLift = (float)(7 - std::min(7, (int)d)) * 3.f;
-        r = (int)((float)kSea[lvl][0] + shallowLift + (float)(j / 3));
-        g = (int)((float)kSea[lvl][1] + shallowLift + (float)(j / 2));
-        b = (int)((float)kSea[lvl][2] + shallowLift * 1.4f + (float)(j / 2));
+        float pale = shoal * 26.f;
+        r = (int)((float)kSea[lvl][0] + pale * 0.7f + (float)(j / 3));
+        g = (int)((float)kSea[lvl][1] + pale + (float)(j / 2));
+        b = (int)((float)kSea[lvl][2] + pale * 0.8f + (float)(j / 2));
 
-        // The steep face just under a crest catches the light.
-        if (surf > 0.30f && surf <= 0.70f) {
-          float f = (surf - 0.30f) / 0.40f * 0.40f;
+        // The lit face under a crest — again, only once it is shoaling.
+        if (surf > 0.28f && surf <= 0.72f && shoal > 0.12f) {
+          float f = (surf - 0.28f) / 0.44f * (0.55f * shoal);
           r += (int)(26.f * f); g += (int)(64.f * f); b += (int)(52.f * f);
         }
-        // Breaking: only the biggest crests, only sometimes, and it persists
-        // for a few frames so a cap has a life rather than a threshold.
-        if (surf > 0.52f) {
-          float over = (surf - 0.52f) / 0.48f;
+
+        // Sun glitter: offshore you read the swell from the way light
+        // scatters off the wave faces, not from bands of colour. Density
+        // follows the slope, so the sets are still legible as movement.
+        if (shoal < 0.45f) {
+          float slope = std::fabs(swell);
+          uint32_t gh = hash3((uint32_t)x, (uint32_t)(y + (int)(animT * 4.f)),
+                              w.worldSeed ^ 0x611778u);
+          uint32_t density = (uint32_t)(90.f - 62.f * slope);
+          if (density < 8u) density = 8u;
+          if ((gh % density) == 0u) {
+            float g2 = 0.35f + 0.65f * slope;
+            r = (int)(r + (210 - r) * g2 * 0.55f);
+            g = (int)(g + (232 - g) * g2 * 0.55f);
+            b = (int)(b + (246 - b) * g2 * 0.55f);
+          }
+        }
+
+        // BREAKING. The threshold falls as the wave shoals, so one set rolls
+        // on untouched in deep water and detonates on the reef.
+        float thresh = 0.74f - 0.48f * shoal;
+        if (surf > thresh) {
+          float over = std::clamp((surf - thresh) / std::max(0.12f, 1.f - thresh), 0.f, 1.f);
           uint32_t cellId = hash3((uint32_t)(x / 2), (uint32_t)(y / 2), w.worldSeed);
           uint32_t epoch = (uint32_t)(animT * 1.7f);
           uint32_t bh = hash3(cellId, epoch, 0xB2EAu);
-          float life = (animT * 1.7f) - (float)epoch;         // 0..1 through the cap
-          bool breaking = (bh % 100u) < (uint32_t)(18.f + 62.f * over);
+          float life = (animT * 1.7f) - (float)epoch;
+          // In the surf zone it always breaks; offshore only sometimes.
+          bool breaking = shoal > 0.55f ||
+                          (bh % 100u) < (uint32_t)(10.f + 60.f * over);
           if (breaking) {
-            float fade = std::sin(3.14159f * std::clamp(life, 0.f, 1.f));
-            float f = std::min(1.f, over * 1.4f) * fade * 0.85f;
-            r = (int)(r + (232 - r) * f);
-            g = (int)(g + (243 - g) * f);
-            b = (int)(b + (250 - b) * f);
+            float fade = shoal > 0.55f ? 1.f
+                                       : std::sin(3.14159f * std::clamp(life, 0.f, 1.f));
+            float f = std::min(1.f, over * (0.9f + 1.4f * shoal)) * fade;
+            r = (int)(r + (236 - r) * f);
+            g = (int)(g + (246 - g) * f);
+            b = (int)(b + (252 - b) * f);
           }
         }
-        // Spindrift: sparse foam specks blowing off the crests downwind.
-        if (surf > 0.52f) {
+
+        // Whitewater: once a wave has broken it keeps churning inshore, and
+        // the wash runs up against whatever it broke on.
+        if (shore > 0.f) {
+          float washPh = surf * 0.5f + 0.5f;
+          float wash = shore * (0.35f + 0.45f * grp) * washPh;
+          uint32_t wh2 = hash3((uint32_t)x, (uint32_t)y,
+                               (uint32_t)(animT * 5.f) * 2654435761u);
+          if ((wh2 % 5u) < 2u) {
+            r = (int)(r + (232 - r) * wash);
+            g = (int)(g + (242 - g) * wash);
+            b = (int)(b + (248 - b) * wash);
+          }
+        }
+
+        // Spindrift blowing off the biggest crests.
+        if (surf > 0.55f && shoal < 0.5f) {
           uint32_t sp = hash3((uint32_t)x, (uint32_t)(y + (int)(animT * 3.f)),
                               w.worldSeed ^ 0x5D1F7u);
-          if ((sp % 80u) == 0u) { r += 60; g += 66; b += 68; }
-        }
-      } else if (!stillBiome) {
-        // Shallows: the SAME swell field rolls in from the deep (so sets
-        // cross the depth boundary seamlessly) and hands over to contour
-        // surf as the water thins — breaks pulse when a set arrives.
-        float grp;
-        float swell = pixelviewSwell(w, x, y, animT, h, &grp);
-        float shorePh = (float)w.height[y][x] * 0.55f - animT * 3.0f;
-        float crest = std::sin(shorePh + 0.5f * std::sin(shorePh * 0.31f + (float)(h & 7u)));
-        float mixS = 0.85f - 0.25f * (float)(d - 1);  // d1: surfy, d3: swelly
-        float ripple = crest * mixS + swell * (1.f - mixS);
-
-        int lift = (int)(ripple * 16.f);
-        r += lift / 2; g += lift; b += lift;
-        crest *= (0.55f + 0.45f * grp);  // breaks ride the arriving sets
-
-        // Breaking: near shore the crest goes foam-white, with a softer
-        // spray band just behind it.
-        bool nearShore = false;
-        for (int oy = -1; oy <= 1 && !nearShore; ++oy)
-          for (int ox = -1; ox <= 1; ++ox) {
-            int nx2 = x + ox, ny2 = y + oy;
-            if (nx2 < 0 || ny2 < 0 || nx2 >= W || ny2 >= H) continue;
-            if (w.water[ny2][nx2] == 0) { nearShore = true; break; }
-          }
-        if (nearShore && crest > 0.55f) {
-          float f = (crest - 0.55f) / 0.45f;  // 0..1 into the break
-          r = (int)(r + (228 - r) * f);
-          g = (int)(g + (238 - g) * f);
-          b = (int)(b + (246 - b) * f);
-        } else if (nearShore && crest > 0.05f && crest <= 0.55f) {
-          // Spray: dissolving cloud of bright pixels trailing the break —
-          // the Surf Sandbox signature. Scatter pattern drifts with time.
-          uint32_t sp = hash3((uint32_t)x, (uint32_t)y,
-                              (uint32_t)(animT * 6.0f) * 2654435761u);
-          if ((sp % 6u) == 0u) { r = 205; g = 228; b = 240; }
-        } else if (d <= 2 && crest > 0.80f) {
-          r += 35; g += 40; b += 38;  // shallow crest sparkle offshore
+          if ((sp % 90u) == 0u) { r += 55; g += 60; b += 62; }
         }
       }
     }
@@ -1183,6 +1285,32 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
         r = (int)(r + (232 - r) * lay);
         g = (int)(g + (238 - g) * lay);
         b = (int)(b + (248 - b) * lay);
+      }
+    }
+  }
+
+  // Marine life: shoals working the water, drawn over it. Only where there is
+  // enough sea to be worth swimming in.
+  if (d > 0 && (w.biome == OCEAN || w.island || w.biome == TROPICAL)) {
+    const MarineLife& M = pixelviewMarine(w, animT);
+    uint8_t m = M.cell[(size_t)y * W + x];
+    if (m) {
+      int sh2 = 7 - std::min(7, (int)d);     // deeper fish read dimmer
+      switch (m - 1) {
+        case 0:  // sardines: a silver flicker
+          r = 176 + sh2 * 6; g = 200 + sh2 * 5; b = 214 + sh2 * 4;
+          break;
+        case 1:  // reef fish: colour on the shallows
+          switch ((h >> 11) % 4u) {
+            case 0:  r = 250; g = 170; b = 60;  break;
+            case 1:  r = 240; g = 210; b = 90;  break;
+            case 2:  r = 90;  g = 200; b = 220; break;
+            default: r = 220; g = 110; b = 160; break;
+          }
+          break;
+        default: // a ray or a turtle, moving on its own errand
+          r = 54 + sh2 * 3; g = 66 + sh2 * 3; b = 86 + sh2 * 3;
+          break;
       }
     }
   }
