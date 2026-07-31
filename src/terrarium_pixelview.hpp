@@ -945,13 +945,19 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
         }
         r += j / 2; g += j / 2; b += j / 2;
 
-        // Parapet: the lip of the roof catches the light, which is what
-        // gives a block its outline from above.
-        bool edge = !pixelviewSameBuilding(w, x, y, x - 1, y) ||
-                    !pixelviewSameBuilding(w, x, y, x + 1, y) ||
-                    !pixelviewSameBuilding(w, x, y, x, y - 1) ||
-                    !pixelviewSameBuilding(w, x, y, x, y + 1);
-        if (edge) { r += 42; g += 40; b += 38; }
+        // Parapet, DIRECTIONALLY. A lot is only 3-6 cells across, so with a
+        // four-way test almost every cell of a building is an edge and a flat
+        // lift brightened whole roofs to near-white — badly so once the
+        // brightness lift was turned up. The lip is lit on the north-west
+        // sides (matching the hillshade) and shadowed on the south-east, so
+        // the outline reads as relief instead of a highlight.
+        bool edgeNW = !pixelviewSameBuilding(w, x, y, x - 1, y) ||
+                      !pixelviewSameBuilding(w, x, y, x, y - 1);
+        bool edgeSE = !pixelviewSameBuilding(w, x, y, x + 1, y) ||
+                      !pixelviewSameBuilding(w, x, y, x, y + 1);
+        bool edge = edgeNW || edgeSE;
+        if (edgeNW)      { r += 24; g += 23; b += 22; }
+        else if (edgeSE) { r -= 18; g -= 17; b -= 16; }
 
         // Rooftop plant: tanks, ducts, stair heads, the odd garden or pad.
         uint32_t rh = hash3((uint32_t)x, (uint32_t)y, famh ^ 0x0F007u);
@@ -1114,9 +1120,11 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
       // Roofs take snow too, but blended: a hard white speckle over the
       // city's painted metal read as static rather than settled snow.
       if (w.biome == CITY && isCityBuilding(t)) {
+        // A DUSTING. At 0.35-0.80 this repainted the city white for the whole
+        // of a (day-long) winter, which on a bright panel is a lot of lamp.
         uint32_t sh = hash3((uint32_t)x, (uint32_t)y, 0x524F4F46u);
-        float lay = (0.35f + 0.45f * seasonLerp(tick)) *
-                    (0.55f + 0.45f * (float)(sh & 255u) / 255.f);
+        float lay = (0.10f + 0.20f * seasonLerp(tick)) *
+                    (0.35f + 0.65f * (float)(sh & 255u) / 255.f);
         r = (int)(r + (232 - r) * lay);
         g = (int)(g + (238 - g) * lay);
         b = (int)(b + (248 - b) * lay);
