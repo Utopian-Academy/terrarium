@@ -1100,6 +1100,61 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
     r = (int)(r * shape); g = (int)(g * shape); b = (int)(b * shape);
   }
 
+  // ---- Seasonal legibility ----
+  // A +14 red / -6 green nudge was not a season, it was a rumour. The canopy
+  // is the loudest signal nature has, so it carries most of this: woods turn,
+  // go bare, and come back, per-tree so a stand is mottled rather than
+  // uniformly repainted.
+  if (tintable && w.biome != TROPICAL && w.biome != ALIEN && w.biome != CITY) {
+    bool woody = (t == 'T' || t == 'Y' || t == 'P');
+    bool leafy = woody || t == '#';
+    if (leafy) {
+      float sl = seasonLerp(tick);
+      uint32_t th = hash3((uint32_t)(x / 2), (uint32_t)(y / 2),
+                          w.worldSeed ^ 0xAC0A17u);
+      float own = (float)(th & 255u) / 255.f;      // this tree's own clock
+      if (season == AUTUMN) {
+        float turn = std::clamp(sl * 1.5f - own * 0.45f, 0.f, 1.f);
+        int tr, tg, tb;
+        switch ((th >> 9) % 4u) {                  // gold, amber, rust, scarlet
+          case 0:  tr = 226; tg = 178; tb = 52;  break;
+          case 1:  tr = 218; tg = 132; tb = 44;  break;
+          case 2:  tr = 176; tg = 86;  tb = 40;  break;
+          default: tr = 196; tg = 62;  tb = 46;  break;
+        }
+        r = (int)(r + (tr - r) * turn);
+        g = (int)(g + (tg - g) * turn);
+        b = (int)(b + (tb - b) * turn);
+      } else if (season == WINTER) {
+        // Bare wood: the leaves are on the ground, not the tree.
+        float bare = std::clamp(0.55f + 0.45f * sl, 0.f, 1.f);
+        int tr = 104 + (int)(26.f * own), tg = 88 + (int)(20.f * own), tb = 74;
+        r = (int)(r + (tr - r) * bare);
+        g = (int)(g + (tg - g) * bare);
+        b = (int)(b + (tb - b) * bare);
+      } else if (season == SPRING) {
+        // New growth, and blossom on about a third of the stand.
+        float fresh = std::clamp(1.f - sl * 0.7f, 0.f, 1.f);
+        g = (int)(g + (200 - g) * 0.30f * fresh);
+        r = (int)(r + (150 - r) * 0.16f * fresh);
+        if (woody && ((th >> 17) % 3u) == 0u) {
+          float bloom = std::clamp(1.3f - sl * 1.8f, 0.f, 1.f);
+          uint32_t ph = hash3((uint32_t)x, (uint32_t)y, 0xB105u);
+          if ((ph % 3u) == 0u) {
+            int pr = ((th >> 20) & 1u) ? 244 : 250;
+            int pg = ((th >> 20) & 1u) ? 196 : 232;
+            int pb = ((th >> 20) & 1u) ? 214 : 236;
+            r = (int)(r + (pr - r) * bloom);
+            g = (int)(g + (pg - g) * bloom);
+            b = (int)(b + (pb - b) * bloom);
+          }
+        }
+      } else if (season == SUMMER) {
+        g = (int)(g * 0.94f); r = (int)(r * 1.05f);   // deep, slightly dusty
+      }
+    }
+  }
+
   // Season grade on terrain: autumn browns the foliage, spring vivifies,
   // winter cools — plus a frost/snow dusting on open ground in winter.
   if (tintable) {
@@ -1132,6 +1187,23 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
     }
   }
 
+  // Ice. Water is the other unmistakable seasonal tell: it freezes from the
+  // shallows outward, so a pond goes over completely while a harbour or an
+  // open sea only crusts at its edges.
+  if (d > 0 && snowy && w.biome != TROPICAL) {
+    float sl = seasonLerp(tick);
+    float depthFactor = (d <= 2) ? 1.0f : (d <= 4 ? 0.45f : 0.10f);
+    uint32_t ih = hash3((uint32_t)x, (uint32_t)y, w.worldSeed ^ 0x1CE1u);
+    float rough = 0.75f + 0.25f * (float)(ih & 255u) / 255.f;
+    float ice = std::clamp(sl * 1.25f, 0.f, 1.f) * depthFactor * rough;
+    if (ice > 0.02f) {
+      r = (int)(r + (198 - r) * ice);
+      g = (int)(g + (220 - g) * ice);
+      b = (int)(b + (236 - b) * ice);
+      if (ice > 0.55f && (ih % 41u) == 0u) { r = 236; g = 246; b = 252; }  // a crack
+    }
+  }
+
   // Cloud shadow + smooth day/night cycle (dawn gold, dusk amber, cool
   // moonlit nights — never a hard brightness step).
   float shade = 1.0f - (pixelviewCloudAt(w, x, y) / 255.0f) * 0.35f;
@@ -1140,6 +1212,32 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
   float rr = (float)r * bright * (1.f + 0.20f * dl.warm);
   float gg = (float)g * bright * (1.f + 0.04f * (dl.warm > 0.f ? dl.warm : 0.f));
   float bb = (float)b * bright * (1.f - 0.18f * dl.warm);
+
+  // Things in the air: leaves off the turning wood in autumn, blossom in
+  // spring. They blow with the wind, which also makes the wind visible.
+  if (w.biome != TROPICAL && w.biome != ALIEN && d == 0 && e == ' ' &&
+      (season == AUTUMN || season == SPRING)) {
+    float br2 = displayBrightness();
+    float wx4 = (w.wind.dx == 0 && w.wind.dy == 0) ? 0.6f : (float)w.wind.dx;
+    float wy4 = (float)w.wind.dy + 0.55f;          // everything settles
+    float drift = 0.9f + 0.45f * (float)w.wind.strength;
+    uint32_t lh = hash3((uint32_t)(x - (int)(animT * wx4 * drift)),
+                        (uint32_t)(y - (int)(animT * wy4 * drift)),
+                        w.worldSeed ^ (season == AUTUMN ? 0x1EAFu : 0xB1055u));
+    if ((lh % (season == AUTUMN ? 300u : 420u)) == 0u) {
+      float flutter = 0.55f + 0.45f * std::sin(animT * 3.1f + (float)(lh & 31u));
+      float p = flutter * br2 * (season == AUTUMN ? 0.85f : 0.75f);
+      if (season == AUTUMN) {
+        switch ((lh >> 7) % 3u) {
+          case 0:  rr += 210.f * p; gg += 140.f * p; bb += 40.f * p; break;
+          case 1:  rr += 190.f * p; gg += 80.f * p;  bb += 36.f * p; break;
+          default: rr += 220.f * p; gg += 176.f * p; bb += 56.f * p; break;
+        }
+      } else {
+        rr += 240.f * p; gg += 200.f * p; bb += 215.f * p;   // petals
+      }
+    }
+  }
 
   // Fireflies: sparse warm motes drifting through non-winter nights.
   if (dl.level < 0.30f && season != WINTER && d == 0 && e == ' ' &&
