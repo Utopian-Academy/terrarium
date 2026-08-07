@@ -547,6 +547,99 @@ inline PixelviewSkyCast& pixelviewSkyCast(float animT) {
   return S;
 }
 
+// The three cloud decks, evaluated ONCE PER FRAME into buffers.
+//
+// This is not premature optimisation, it is the difference between the
+// kiosk running and not. Sampled per pixel, each deck needed one field
+// value plus four more for the shading gradient, and each field value is
+// eight noise evaluations (two to warp, three smooth, three billow) — 120
+// noise evaluations per pixel, which measured 27.5 ms/frame against 7-13
+// for every other biome and crawled on the Pi.
+//
+// Evaluated once per cell per frame instead, the gradient comes from the
+// NEIGHBOURING cells for free — and it is a better gradient, because it is
+// a true difference over the drawn image rather than a re-sample of the
+// underlying function at an arbitrary epsilon.
+struct PixelviewSkyDeckCfg {
+  float scale, speed, cover, soft, lit, stretch;
+};
+inline const PixelviewSkyDeckCfg* pixelviewSkyDecks() {
+  // `stretch` elongates the deck ALONG the wind: cirrus is combed out into
+  // long streaks by the fast air it sits in, while the low cumulus is much
+  // closer to round.
+  static const PixelviewSkyDeckCfg decks[3] = {
+      {30.f, 1.55f, 0.36f, 0.30f, 1.06f, 3.4f},   // high cirrus
+      {19.f, 0.85f, 0.37f, 0.17f, 1.00f, 1.9f},   // fair-weather cumulus
+      {11.f, 0.42f, 0.28f, 0.12f, 0.94f, 1.35f},  // low and close
+  };
+  return decks;
+}
+
+struct PixelviewSkyField {
+  float t = -1e9f;
+  uint32_t seed = 0;
+  std::vector<float> d[3];
+};
+
+inline const PixelviewSkyField& pixelviewSkyFieldAt(const World& w,
+                                                    float animT) {
+  static PixelviewSkyField F;
+  if (F.t == animT && F.seed == w.worldSeed) return F;
+  F.t = animT;
+  F.seed = w.worldSeed;
+
+  float wx = (w.wind.dx == 0 && w.wind.dy == 0) ? 0.55f : (float)w.wind.dx;
+  float wy = (float)w.wind.dy;
+  float wind = 0.85f + 0.35f * (float)w.wind.strength;
+  float wlen = std::sqrt(wx * wx + wy * wy);
+  if (wlen < 0.001f) { wx = 1.f; wy = 0.f; wlen = 1.f; }
+  float ca = wx / wlen, sa = wy / wlen;
+
+  // Evaluated on a HALF-RESOLUTION lattice and bilinearly expanded. The
+  // smallest feature any deck carries is a couple of cells across, and a
+  // cloud is a soft object — so sampling every other cell and interpolating
+  // is visually indistinguishable while costing a quarter as much. This is
+  // the step that brings the sky back in line with the other biomes.
+  const int HWn = (W + 1) / 2 + 1, HHn = (H + 1) / 2 + 1;
+  static std::vector<float> tmp;
+  if (tmp.size() != (size_t)HWn * HHn) tmp.assign((size_t)HWn * HHn, 0.f);
+
+  const PixelviewSkyDeckCfg* decks = pixelviewSkyDecks();
+  for (int L = 0; L < 3; ++L) {
+    const PixelviewSkyDeckCfg& D = decks[L];
+    if (F.d[L].size() != (size_t)W * H) F.d[L].assign((size_t)W * H, 0.f);
+    float drift = animT * D.speed * wind * 2.4f * wlen;
+    float stretch = D.stretch * (1.f + 0.45f * (float)w.wind.strength);
+    uint32_t salt = w.worldSeed ^ (0x51000u + (uint32_t)L * 0x77u);
+
+    for (int hy = 0; hy < HHn; ++hy) {
+      for (int hx = 0; hx < HWn; ++hx) {
+        float px2 = (float)(hx * 2) - ca * drift;
+        float py2 = (float)(hy * 2) - sa * drift;
+        float u = px2 * ca + py2 * sa;
+        float v = -px2 * sa + py2 * ca;
+        tmp[(size_t)hy * HWn + hx] =
+            pixelviewCloudF(u / stretch, v, D.scale, salt);
+      }
+    }
+    for (int y = 0; y < H; ++y) {
+      int iy = y >> 1;
+      float fy2 = (y & 1) ? 0.5f : 0.f;
+      const float* r0 = &tmp[(size_t)iy * HWn];
+      const float* r1 = &tmp[(size_t)(iy + 1) * HWn];
+      float* out = &F.d[L][(size_t)y * W];
+      for (int x = 0; x < W; ++x) {
+        int ix = x >> 1;
+        float fx2 = (x & 1) ? 0.5f : 0.f;
+        float a0 = r0[ix] + (r0[ix + 1] - r0[ix]) * fx2;
+        float a1 = r1[ix] + (r1[ix + 1] - r1[ix]) * fx2;
+        out[x] = a0 + (a1 - a0) * fy2;
+      }
+    }
+  }
+  return F;
+}
+
 // The whole sky, for one cell. Returns the colour directly — there is no
 // terrain underneath to blend with, so this replaces the palette outright
 // the way ALIEN does rather than tinting anything.
@@ -616,20 +709,10 @@ inline void pixelviewSkyCell(const World& w, int x, int y, float animT,
   // sparse for the sky to stay a sky: at 0.24/0.26/0.18 roughly half the
   // panel is open air, which is what lets the blue read and gives the
   // traffic something to cross.
-  // `stretch` elongates the deck ALONG the wind: cirrus is combed out into
-  // long streaks by the fast air it sits in, while the low cumulus is much
-  // closer to round.
-  struct Deck { float scale, speed, cover, soft, lit, stretch; };
-  static const Deck decks[3] = {
-      // High cirrus: thin, fast, wispy, barely there.
-      {30.f, 1.55f, 0.36f, 0.30f, 1.06f, 3.4f},
-      // Mid deck: the classic fair-weather cumulus field.
-      {19.f, 0.85f, 0.37f, 0.17f, 1.00f, 1.9f},
-      // Low and close: big, slow, and it passes right over you.
-      {11.f, 0.42f, 0.28f, 0.12f, 0.94f, 1.35f},
-  };
+  const PixelviewSkyDeckCfg* decks = pixelviewSkyDecks();
+  const PixelviewSkyField& F = pixelviewSkyFieldAt(w, animT);
 
-  // The wind's frame — everything below is sampled along/across it.
+  // The wind's frame — the streaks below still use it.
   float wlen = std::sqrt(wx * wx + wy * wy);
   if (wlen < 0.001f) { wx = 1.f; wy = 0.f; wlen = 1.f; }
   float ca = wx / wlen, sa = wy / wlen;
@@ -641,23 +724,14 @@ inline void pixelviewSkyCell(const World& w, int x, int y, float animT,
   float sunX = std::cos(sunA), sunY = std::sin(sunA);
 
   for (int L = 0; L < 3; ++L) {
-    const Deck& D = decks[L];
-    // Drift: this deck's own speed. The parallax between the three is the
-    // depth cue, so they must not share a rate.
-    float drift = animT * D.speed * wind * 2.4f * wlen;
-    float px2 = (float)x - ca * drift;
-    float py2 = (float)y - sa * drift;
-    // Into the wind's frame, then STRETCHED along it. Wind shears a cloud
-    // out in the direction it is pushing, and that elongation is most of
-    // what makes even a still frame look like it is being blown.
-    float u = px2 * ca + py2 * sa;
-    float v = -px2 * sa + py2 * ca;
-    float stretch = D.stretch * (1.f + 0.45f * (float)w.wind.strength);
-    uint32_t salt = w.worldSeed ^ (0x51000u + (uint32_t)L * 0x77u);
-    auto field = [&](float uu, float vv) {
-      return pixelviewCloudF(uu / stretch, vv, D.scale, salt);
+    const PixelviewSkyDeckCfg& D = decks[L];
+    const std::vector<float>& buf = F.d[L];
+    auto at = [&](int xx, int yy) {
+      xx = std::clamp(xx, 0, W - 1);
+      yy = std::clamp(yy, 0, H - 1);
+      return buf[(size_t)yy * W + xx];
     };
-    float n = field(u, v);
+    float n = at(x, y);
 
     // The world's own weather opens and closes the sky, so an overcast in
     // the sim is an overcast up here too.
@@ -675,14 +749,12 @@ inline void pixelviewSkyCell(const World& w, int x, int y, float animT,
     float depth = std::clamp((n - thr) / 0.22f, 0.f, 1.f);
 
     // Shading from the real GRADIENT of the field, lit from the sun's
-    // azimuth, instead of one offset sample. Where the cloud rises toward
-    // the sun it catches light; the lee side falls into its own shadow.
-    const float e2 = 1.6f;
-    float gu = field(u + e2, v) - field(u - e2, v);
-    float gv = field(u, v + e2) - field(u, v - e2);
-    float gx2 = gu * ca - gv * sa;      // gradient back into world axes
-    float gy2 = gu * sa + gv * ca;
-    float lit = std::clamp(0.5f + (gx2 * sunX + gy2 * sunY) * 7.0f, 0.f, 1.f);
+    // azimuth. Taken from the neighbouring cells of the cached deck, so it
+    // is free — and it is already in world axes, needing no rotation back
+    // out of the wind frame.
+    float gx2 = (at(x + 1, y) - at(x - 1, y)) * 0.5f;
+    float gy2 = (at(x, y + 1) - at(x, y - 1)) * 0.5f;
+    float lit = std::clamp(0.5f + (gx2 * sunX + gy2 * sunY) * 16.f, 0.f, 1.f);
 
     // From below you are looking at undersides, so the base sits in shade
     // and only the shoulders take the sun. A cloud's shadow is lit by the

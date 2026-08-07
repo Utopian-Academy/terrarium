@@ -14,6 +14,7 @@
 #define SDL_MAIN_HANDLED
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -322,6 +323,42 @@ int toneAudit(int warm, float animT) {
   return flat;
 }
 
+// How expensive is a frame, per biome? The kiosk is a 512MB Pi Zero 2
+// rendering 1px/cell in a single thread, so per-pixel cost is a hard budget
+// and not an abstraction. Reported as the cost of a full W*H frame and the
+// tps that cost alone would allow.
+int benchBiomes(int warm, int frames) {
+  std::printf("%-9s  %8s  %8s   %s\n", "biome", "ms/frame", "max fps",
+              "budget at 140x140");
+  for (int b = 0; b < BIOME_COUNT; ++b) {
+    Rng rng(99u + (uint32_t)b);
+    World world;
+    seedWorld(world, rng, (Biome)b);
+    std::string banner;
+    for (int k = 0; k < warm; ++k) {
+      step(world, rng, banner, k);
+      g_stepEvents.clear();
+    }
+    auto t0 = std::chrono::steady_clock::now();
+    volatile uint32_t sink = 0;
+    for (int f = 0; f < frames; ++f) {
+      float animT = 20.f + (float)f * 0.09f;   // defeat per-frame caches
+      for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) {
+          PixelviewRGB c = pixelviewCellColor(world, x, y, f, animT);
+          sink += c.r + c.g + c.b;
+        }
+    }
+    (void)sink;
+    double ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t0).count() /
+                (double)frames;
+    std::printf("%-9s  %8.2f  %8.1f\n", biomeName((Biome)b), ms,
+                ms > 0 ? 1000.0 / ms : 0.0);
+  }
+  return 0;
+}
+
 int biomeFromName(const std::string& n) {
   for (int i = 0; i < BIOME_COUNT; ++i) {
     std::string bn = biomeName((Biome)i);
@@ -366,6 +403,7 @@ int main(int argc, char** argv) {
     else if (a == "--selftest")
       return (selfTestBiomeNames() + selfTestSkyExits()) ? 1 : 0;
     else if (a == "--tone") return toneAudit(warm, animT) ? 1 : 0;
+    else if (a == "--bench") return benchBiomes(warm, 8);
     else if (a == "--daynight") g_daynightMode = std::atoi(need(i).c_str());
     else {
       std::fprintf(stderr, "unknown option: %s\n", a.c_str());
