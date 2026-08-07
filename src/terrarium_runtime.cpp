@@ -78,15 +78,13 @@ struct SdlSession {
   }
 };
 
+// Matched against biomeName() so the parser cannot drift from the enum. The
+// hand-written chain this replaces silently returned MEADOW for any name it
+// did not know, which meant `--biome sky` ran a meadow and looked, to anyone
+// watching the panel, exactly like the sky biome being broken.
 Biome parseBiomeName(const std::string& value) {
-  if (value == "meadow") return MEADOW;
-  if (value == "wetland") return WETLAND;
-  if (value == "alpine") return ALPINE;
-  if (value == "alien") return ALIEN;
-  if (value == "tropical") return TROPICAL;
-  if (value == "desert") return DESERT;
-  if (value == "city") return CITY;
-  if (value == "ocean") return OCEAN;
+  for (int i = 0; i < BIOME_COUNT; ++i)
+    if (value == biomeName((Biome)i)) return (Biome)i;
   return MEADOW;
 }
 

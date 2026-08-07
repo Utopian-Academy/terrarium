@@ -1,5 +1,121 @@
 # Terrarium changes
 
+## 2026-08-05 — a kinder palette, a sky to fly through, and softer crossings
+
+### The rivers were running whitewater (bug)
+Every inland channel was rendering as flat grey standing surf. The surf
+system decides how much a wave is shoaling by counting land in a 5x5 box —
+but a river two cells wide has ~20 land cells in that box, so `shore` pinned
+to 1.0, `shoal` to 0.9, and `breaking` (which triggers at shoal > 0.55) was
+**permanently true**. Whole rivers were being drawn as a wave in the act of
+breaking, forever. Narrow water now takes the flowing-ripple path whatever
+the height gradient says, and the shore ramp starts where a beach actually
+is (2..13 of 24 neighbours, not 6). Pale flat water in a tropical frame:
+239 cells down to 35.
+
+### Palette: less abrasive, more lovely
+- **A harmony grade over the whole frame**, applied last so nothing has to
+  know about it: a soft chroma ceiling that only bites on the loudest cells
+  (a flat saturation multiply drags the quiet 80% down with the loud 20% and
+  reads as a faded photograph), shadows-cool/highlights-warm split tone, and
+  a black lift — colour hard against true black is what makes an edge buzz.
+  Live knob at `~/.terrarium-harmony`, 0..1, same polling idiom as
+  `swell`/`brightness`, because how much is a matter of taste and taste is
+  judged on the panel. **Water is exempt from the ceiling**: that ramp was
+  built as one deliberate navy→turquoise scale, and grading it was what
+  turned the shallows into grey sheets.
+- **Autumn was a coat of brown paint.** +14 red / -6 green on the terrain
+  stacked on top of the canopy turn and took the whole world to chocolate —
+  and on alpine's blue-grey scree the two together came out lilac. It is a
+  warm light over the ground now, and **grass turns too** (tawny, like a
+  hayfield in October, not gold like a maple), because in a meadow the trees
+  are far too sparse to carry a season alone.
+- **Snow drifts instead of dithering.** A per-cell coin flip against a
+  coverage fraction is white noise, and white noise at 1px/cell is
+  indistinguishable from a failing panel — it was the loudest thing in a
+  winter frame. Snow now banks against a smooth depth field, and takes a
+  blue shade in its hollows.
+- **Alpine** stops going periwinkle, **desert** and **tropical reef water**
+  keep some blue rather than clashing at full chroma, and **accents**
+  (flowers, mushrooms, coral) keep their chosen hue but take a fifth of the
+  biome grade — an ungraded full-chroma cell alone on a field of sand reads
+  as a stuck pixel, not a flower.
+- **The tropical floor pools its shade.** Bare loam was the second most
+  common thing in a tropical frame (670 cells in 12100) and all of it sat
+  near luminance 45 with reef water at 130 beside it, which is why the world
+  looked like it had holes punched in it. The dark is worth keeping — it now
+  runs from sunlit leaf litter to deep shade across a smooth field, so the
+  gloom gathers into patches you read as depth.
+
+### Two parsers that silently lied
+`--biome sky` ran a MEADOW. Both pico and the standalone matched biome names
+with a hand-written if-chain that fell through to the default for anything
+it did not list, so a new biome parsed as meadow without a word of
+complaint — and the kiosk showed rivers, plants and flowers in what it
+cheerfully reported as the "sky". Both now match against `biomeName()`, so
+the parser cannot drift from the enum, and pico *exits* on an unknown name:
+a typo you cannot see on a wall-mounted panel is worse than a hard failure.
+`tools/terrarium_contact --selftest` covers the round-trip.
+
+### Nothing in the sky may wink out
+Two flyers vanished in mid-air rather than leaving. The UFO's waypoints were
+all interior, so when its dwell elapsed it simply stopped existing wherever
+it was hovering; it now arrives from off-panel and darts off-panel to go,
+dragging a speed-dependent streak so a fast leg reads as travel rather than
+a teleport. The balloons squashed their heading toward the horizontal
+(`sin(a) * 0.45`) but never renormalised it, so a near-vertical heading
+covered less than half the intended distance and began and ended its
+crossing inside the disc. Both are now covered by a self-test that walks
+4000 seconds and asserts every flyer is outside the visible disc on the
+first and last frame of every crossing.
+
+### The sky biome
+A ninth biome, and the only one you look UP at. No ground: `height` carries
+cloud body instead of altitude and the renderer supplies the whole picture —
+a radial zenith→horizon ramp that takes the same daylight as everywhere else
+(golden hour, deep blue night, stars), and **three cloud decks at different
+scales drifting at different speeds**, because the parallax between them is
+the entire illusion of depth. Clouds are shaded by resampling the field
+sunward, so they have tops and undersides rather than being white blobs.
+Crossing them: hot air balloons (gored envelopes, six liveries, basket and
+rigging), airliners with contrails that widen and fray behind them and nav
+lights at night, wheeling birds, and — one epoch in three, every four
+minutes or so — a unicorn, cantering, with a rainbow tail and a trail of
+sparks. Sizes and speeds differ by altitude, which is the only depth cue
+available when there is no ground to judge against. It has its own musical
+identity too (highest register, longest phrases, open fourths, mostly rests)
+and it is a stop on the voyage.
+
+### Voyage crossings dissolve
+`--drift` used to slide the new world in from the right, which put a hard
+vertical seam — the one straight line in a world that has none — travelling
+across the disc at constant speed. Both worlds now render in place and a
+soft threshold sweeps a noise field, so the boundary is a ragged front that
+fingers and pools like weather coming in. Each cell still crosses exactly
+once.
+
+### Mod matrix: MOD_N 68 -> 70
+Appended (never inserted — saved patches address slots by index):
+`sky_traffic` and `sky_wonder`. The sky was musically inert: it read the
+floor on all ten of the city/ocean/alien identity sources, so nothing about
+it modulated anything. Traffic is computed from the **shared clock in core**,
+not from the renderer — the flyer schedules moved into `skyFlyerUp` and the
+renderer now calls the same function for its geometry, so the music and the
+picture cannot disagree about what is up there, and the source stays true in
+the plugin with no editor open. Verified with `tools/terrarium_modcheck`:
+57/70 sources now vary by biome, sky_traffic 0.761 / sky_wonder 1.000 in SKY
+and at the floor everywhere else. SKY also has a musical identity in all
+seven biome switches (highest register, longest and sparsest phrases, open
+fourths, mostly rests).
+
+### tools/terrarium_contact.cpp
+A headless contact sheet: renders any set of biomes x seasons to a BMP with
+no window, no panel and no Pi. Colour work cannot be done by reading
+arithmetic, and every finding above came out of it — `--dark` and `--grey`
+report which terrain glyph is responsible for a bad patch, which is how the
+tropical "holes" turned out to be bare loam and the grey rivers turned out
+to be permanent surf.
+
 ## 2026-07-22 — plugin UI: see the vat (+ Windows build)
 
 - **The plugin shows the environment now.** A resizable editor window renders

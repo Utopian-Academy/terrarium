@@ -603,6 +603,10 @@ auto regenPattern = [&](){
   // Ocean: long swells and a lot of room between them.
   static const int OCE_A[] = { 36, 48, 60, 72 };
   static const int OCE_B[] = { 30, 36, 48, 90 };
+  // Sky: even longer than the ocean and less regular. Nothing up here has
+  // to arrive anywhere, and the gaps are the point.
+  static const int SKY_A[] = { 48, 60, 84, 96 };
+  static const int SKY_B[] = { 36, 48, 72, 120 };
   static const int ALI_B[] = {  9, 12, 15, 18, 21, 27 };
 
   float fastBias = std::clamp(activity * (0.65f + 0.35f*wind01), 0.0f, 1.0f);
@@ -653,6 +657,13 @@ auto regenPattern = [&](){
                       std::clamp(0.25f + 0.35f*wind01, 0.0f, 1.0f));
       break;
     }
+    case SKY: {
+      // The wind is the only thing with an opinion up here.
+      base = pickPool(SKY_A, (int)(sizeof(SKY_A)/sizeof(SKY_A[0])),
+                      SKY_B, (int)(sizeof(SKY_B)/sizeof(SKY_B[0])),
+                      std::clamp(0.20f + 0.45f*wind01, 0.0f, 1.0f));
+      break;
+    }
     case ALIEN: default: {
       // Odd meters show up more when fauna is high or lifecycle is near mid-year.
       base = pickPool(ALI_B, (int)(sizeof(ALI_B)/sizeof(ALI_B[0])),
@@ -679,6 +690,8 @@ auto regenPattern = [&](){
   else if (base==CIT_B) n=(int)(sizeof(CIT_B)/sizeof(CIT_B[0]));
   else if (base==OCE_A) n=(int)(sizeof(OCE_A)/sizeof(OCE_A[0]));
   else if (base==OCE_B) n=(int)(sizeof(OCE_B)/sizeof(OCE_B[0]));
+  else if (base==SKY_A) n=(int)(sizeof(SKY_A)/sizeof(SKY_A[0]));
+  else if (base==SKY_B) n=(int)(sizeof(SKY_B)/sizeof(SKY_B[0]));
   else n=(int)(sizeof(ALI_B)/sizeof(ALI_B[0]));
 
   // Phrase length: biome-dependent.
@@ -691,6 +704,7 @@ auto regenPattern = [&](){
     case ALIEN: minL=5; maxL=8; break;
     case CITY: minL=6; maxL=8; break;   // long, looping phrases
     case OCEAN: minL=3; maxL=5; break;  // a few notes, then space
+    case SKY: minL=2; maxL=4; break;    // barely a phrase at all
     case MEADOW: default: minL=5; maxL=8; break;
   }
   phraseLen = std::clamp(minL + (int)std::lround((maxL-minL) * (0.35f + 0.55f*diversity01)) + r.irange(-1,1), minL, maxL);
@@ -788,6 +802,7 @@ switch (world.biome) {
   case ALIEN:    regBias = +0; break;  // uncanny center
   case CITY:     regBias = +3; break;  // bright electric piano register
   case OCEAN:    regBias = -8; break;  // deep, and a long way off
+  case SKY:      regBias = +12; break; // the top of the instrument, thin air
 }
 target += (float)regBias;
 
@@ -810,6 +825,9 @@ int leap = 0;
   static const int CIT[] = { -9,-7,-5,-4,-2,0,2,4,5,7,9,14 };
   // Ocean: wide, slow, mostly open fifths and octaves.
   static const int OCE[] = { -12,-7,-5,0,5,7,12 };
+  // Sky: fourths and fifths, drifting up more often than down. Nothing
+  // resolves; it just keeps rising and thinning out.
+  static const int SKY_L[] = { -7,-5,0,2,5,7,12,14,17 };
 
   const int* pool = MEA; int n = (int)(sizeof(MEA)/sizeof(MEA[0]));
   switch(world.biome){
@@ -820,6 +838,7 @@ int leap = 0;
     case ALIEN:   pool=ALI; n=(int)(sizeof(ALI)/sizeof(ALI[0])); break;
     case CITY:    pool=CIT; n=(int)(sizeof(CIT)/sizeof(CIT[0])); break;
     case OCEAN:   pool=OCE; n=(int)(sizeof(OCE)/sizeof(OCE[0])); break;
+    case SKY:     pool=SKY_L; n=(int)(sizeof(SKY_L)/sizeof(SKY_L[0])); break;
     case MEADOW: default: break;
   }
 
@@ -852,6 +871,7 @@ switch (world.biome) {
   case ALIEN:    spread += 3; break;
   case CITY:     spread += 2; break;
   case OCEAN:    spread += 4; break;
+  case SKY:      spread += 5; break;
 }
 spread = std::clamp(spread, 1, 12);
 
@@ -868,6 +888,7 @@ switch (world.biome) {
   case ALIEN:    sparkleP += 0.01f; break;
   case CITY:     sparkleP += 0.04f; break;   // neon glints
   case OCEAN:    sparkleP -= 0.02f; break;
+  case SKY:      sparkleP += 0.07f; break;  // high glints, like sun off metal
 }
 sparkleP = std::clamp(sparkleP, 0.0f, 0.30f);
 
@@ -888,6 +909,7 @@ switch (world.biome) {
   case ALIEN:    harmP += (r.u01()<0.5f ? -0.08f : 0.08f); break;
   case CITY:     harmP += 0.22f; break;   // lush: it is nearly always a chord
   case OCEAN:    harmP += 0.12f; break;   // open, suspended
+  case SKY:      harmP += 0.16f; break;   // open fourths, unresolved
 }
 harmP = std::clamp(harmP, 0.02f, 0.90f);
 

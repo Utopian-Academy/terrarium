@@ -30,6 +30,105 @@ inline float pixelviewMote(uint32_t h, float animT, float lifeSec,
   return env * fl;
 }
 
+// Smooth value noise over the cell grid, 0..1. Hash noise alone is white
+// noise — every cell independent — which at 1px/cell is indistinguishable
+// from dead pixels. Interpolating between lattice points at `scale` cells
+// gives blotches with SIZE, which is what makes a dusting of snow read as
+// drifted rather than as static, and a cloud read as a cloud.
+inline float pixelviewValueNoise(int x, int y, float scale, uint32_t salt) {
+  float fx = (float)x / scale, fy = (float)y / scale;
+  int ix = (int)std::floor(fx), iy = (int)std::floor(fy);
+  float tx = fx - (float)ix, ty = fy - (float)iy;
+  tx = tx * tx * (3.f - 2.f * tx);   // smoothstep: no lattice creases
+  ty = ty * ty * (3.f - 2.f * ty);
+  auto at = [&](int gx, int gy) {
+    return (float)(hash3((uint32_t)gx, (uint32_t)gy, salt) & 1023u) / 1023.f;
+  };
+  float a = at(ix, iy), b2 = at(ix + 1, iy);
+  float c = at(ix, iy + 1), d2 = at(ix + 1, iy + 1);
+  return (a + (b2 - a) * tx) * (1.f - ty) + (c + (d2 - c) * tx) * ty;
+}
+
+// Two octaves, for when one blotch size reads as wallpaper.
+inline float pixelviewFbm2(int x, int y, float scale, uint32_t salt) {
+  return pixelviewValueNoise(x, y, scale, salt) * 0.65f +
+         pixelviewValueNoise(x, y, scale * 0.4f, salt ^ 0x9E37u) * 0.35f;
+}
+
+// Float-coordinate versions. The cell-grid ones above are enough for
+// anything locked to the lattice (snow, soil), but clouds are sampled in a
+// ROTATED, STRETCHED frame — along the wind rather than along the pixel
+// grid — and rounding those coordinates to integers quantises the rotation
+// into visible staircase edges.
+inline float pixelviewValueNoiseF(float fx, float fy, float scale,
+                                  uint32_t salt) {
+  fx /= scale; fy /= scale;
+  float ffx = std::floor(fx), ffy = std::floor(fy);
+  int ix = (int)ffx, iy = (int)ffy;
+  float tx = fx - ffx, ty = fy - ffy;
+  tx = tx * tx * (3.f - 2.f * tx);
+  ty = ty * ty * (3.f - 2.f * ty);
+  auto at = [&](int gx, int gy) {
+    return (float)(hash3((uint32_t)gx, (uint32_t)gy, salt) & 1023u) / 1023.f;
+  };
+  float a = at(ix, iy), b2 = at(ix + 1, iy);
+  float c = at(ix, iy + 1), d2 = at(ix + 1, iy + 1);
+  return (a + (b2 - a) * tx) * (1.f - ty) + (c + (d2 - c) * tx) * ty;
+}
+
+// Three octaves for clouds: one blob size is a texture, three is a FORM —
+// the big octave gives the mass, the middle the lobes, the small the frayed
+// edge where it is coming apart.
+inline float pixelviewFbm3F(float fx, float fy, float scale, uint32_t salt) {
+  return pixelviewValueNoiseF(fx, fy, scale, salt) * 0.54f +
+         pixelviewValueNoiseF(fx, fy, scale * 0.45f, salt ^ 0x9E37u) * 0.31f +
+         pixelviewValueNoiseF(fx, fy, scale * 0.19f, salt ^ 0x2C1Fu) * 0.15f;
+}
+
+// CUMULUS, which smooth fBm cannot give you. Thresholding a smooth field
+// produces rounded blobs that merge and part like metaballs — mathematically
+// pretty, meteorologically wrong, and instantly recognisable as fake.
+//
+// Two changes fix it. BILLOW noise (1 - |2n-1|) creases where the smooth
+// version had a gentle maximum, so every octave contributes a puffy lobe
+// with a hard crease between it and the next — the cauliflower structure of
+// a real cumulus. DOMAIN WARPING then offsets where the field is sampled by
+// another noise field, so boundaries wander and fold back on themselves
+// instead of running smoothly. Neither is expensive; together they are the
+// difference between a lava lamp and a sky.
+inline float pixelviewBillowF(float fx, float fy, float scale, uint32_t salt) {
+  auto oct = [&](float s, uint32_t k) {
+    float n = pixelviewValueNoiseF(fx, fy, s, salt ^ k);
+    return 1.f - std::fabs(2.f * n - 1.f);        // crease at the midline
+  };
+  // Weighted hard toward the LOW octave. Billow's creases are ridges, and
+  // piling up high-frequency octaves of them turns the field into a mess of
+  // thin filaments — marble, not cumulus. The big lobe carries it; the
+  // small ones only roughen the edge.
+  return oct(scale, 0u) * 0.66f +
+         oct(scale * 0.44f, 0x9E37u) * 0.22f +
+         oct(scale * 0.19f, 0x2C1Fu) * 0.12f;
+}
+
+inline float pixelviewCloudF(float fx, float fy, float scale, uint32_t salt) {
+  // Warp by a lower-frequency field, offset per axis. The 0.5 shift keeps
+  // the two warp channels from being the same wave. Kept MODEST: a strong
+  // warp swirls the field into marbling, which is a different wrong answer
+  // from metaballs but just as wrong.
+  float wu = pixelviewValueNoiseF(fx + 31.7f, fy - 12.3f, scale * 1.9f,
+                                  salt ^ 0x77A1u) - 0.5f;
+  float wv = pixelviewValueNoiseF(fx - 8.9f, fy + 44.1f, scale * 1.9f,
+                                  salt ^ 0x3B0Du) - 0.5f;
+  const float warp = scale * 0.22f;
+  float wxx = fx + wu * warp, wyy = fy + wv * warp;
+  // Smooth fBm carries the MASS (where cloud is at all); billow supplies the
+  // lobes and creases within it. Pure billow is all edge and no body; pure
+  // fBm is the metaball. The blend is the cloud.
+  float smooth = pixelviewFbm3F(wxx, wyy, scale, salt);
+  float billow = pixelviewBillowF(wxx, wyy, scale * 0.85f, salt ^ 0x1234u);
+  return smooth * 0.62f + billow * 0.38f;
+}
+
 // Shared ocean swell field: three wave components, angular shape noise,
 // slow group envelope (waves arrive in sets). Island mode propagates
 // radially inward; mainland follows the wind. Used by BOTH the deep and
@@ -166,6 +265,856 @@ inline PixelviewCast& pixelviewCast(float animT) {
     }
   }
   return C;
+}
+
+// ---------------------------------------------------------------------
+// Sky
+// ---------------------------------------------------------------------
+// Everything that crosses the sky, resolved once per frame. Same idiom as
+// the offshore cast: each traveller gets an epoch, a hash off that epoch
+// decides whether it shows up at all and where, and its age within the
+// epoch drives it across. Nothing is stored between frames, so this costs
+// nothing when nobody is looking and can never drift out of sync.
+//
+// The one thing worth saying about scale: these are at DIFFERENT HEIGHTS,
+// and height is the only depth cue available when there is no ground to
+// judge against. So a distant airliner is two pixels and crawls, while a
+// balloon a few hundred feet up is six pixels and slides. Getting that
+// wrong makes everything look like it is painted on the same pane of glass.
+struct PixelviewSkyCast {
+  float t = -1e9f;
+  static const int kBalloons = 3;
+  bool balloonUp[kBalloons];
+  float balloonX[kBalloons], balloonY[kBalloons], balloonR[kBalloons];
+  uint32_t balloonH[kBalloons];
+  static const int kPlanes = 2;
+  bool planeUp[kPlanes];
+  float planeX[kPlanes], planeY[kPlanes], planeDX[kPlanes], planeDY[kPlanes];
+  float planeSize[kPlanes], planeAge[kPlanes];
+  bool unicornUp = false;
+  float uniX = 0.f, uniY = 0.f, uniDir = 1.f, uniAge = 0.f, uniSize = 1.f;
+  bool ufoUp = false;
+  float ufoX = 0.f, ufoY = 0.f, ufoR = 0.f, ufoAge = 0.f, ufoTilt = 0.f;
+  float ufoSpeed = 0.f, ufoVX = 0.f, ufoVY = 0.f;
+  // A long eastern dragon, carried as a chain of body segments so it can
+  // undulate. Serpentine, not winged — the body IS the animation.
+  static const int kDragonSegs = 16;
+  bool dragonUp = false;
+  float dragX[kDragonSegs], dragY[kDragonSegs], dragR[kDragonSegs];
+  uint32_t dragHue = 0;
+  // A rider sitting on a small golden cloud of their own.
+  bool riderUp = false;
+  float riderX = 0.f, riderY = 0.f, riderDir = 1.f;
+  // A witch on a broom, with a companion on the tail.
+  bool witchUp = false;
+  float witchX = 0.f, witchY = 0.f, witchDir = 1.f, witchAge = 0.f;
+  static const int kBirds = 9;
+  float birdX[kBirds], birdY[kBirds];
+  bool flamingo = false;
+};
+
+inline PixelviewSkyCast& pixelviewSkyCast(float animT) {
+  static PixelviewSkyCast S;
+  if (S.t == animT) return S;
+  S.t = animT;
+  const float fw = (float)W, fh = (float)H;
+
+  // Balloons drift with the wind and bob. They are the slowest thing up
+  // here and the most likely to be on screen — a sky with nothing in it for
+  // minutes at a time is just a gradient.
+  for (int i = 0; i < PixelviewSkyCast::kBalloons; ++i) {
+    float period = 150.f + 40.f * (float)i;
+    uint32_t ep = (uint32_t)(animT / period);
+    uint32_t hh = hash3(ep, 0xBA1100u + (uint32_t)i, 0x5C1Eu);
+    float age = animT - (float)ep * period;
+    float cross = period * 0.82f;
+    S.balloonUp[i] = ((hh % 3u) != 0u) && age < cross;
+    if (S.balloonUp[i]) {
+      float p = age / cross;
+      float ang = (float)(hh & 1023u) / 1023.f * 6.283f;
+      // Squash the heading toward the horizontal — balloons drift sideways
+      // far more than they climb — and then NORMALISE it. Un-normalised,
+      // a near-vertical heading gave (0, 0.45): the balloon covered less
+      // than half the intended distance and so began and ended its crossing
+      // inside the disc, appearing and vanishing in mid-air.
+      float dirx = std::cos(ang), diry = std::sin(ang) * 0.45f;
+      float dlen = std::sqrt(dirx * dirx + diry * diry);
+      if (dlen < 0.001f) { dirx = 1.f; diry = 0.f; dlen = 1.f; }
+      dirx /= dlen; diry /= dlen;
+      // The path has to clear the panel at BOTH ends whatever the lane
+      // offset does, so it is measured off the half-diagonal rather than
+      // guessed: nothing may wink out where it can be seen.
+      float halfDiag = 0.5f * std::sqrt(fw * fw + fh * fh);
+      float span = 2.f * (halfDiag + 10.f);
+      float lane = ((float)((hh >> 12) & 255u) / 255.f - 0.5f) * fh * 0.7f;
+      S.balloonX[i] = fw * 0.5f + dirx * (-span * 0.5f + p * span) - diry * lane;
+      S.balloonY[i] = fh * 0.5f + diry * (-span * 0.5f + p * span) + dirx * lane +
+                      2.2f * std::sin(animT * 0.30f + (float)i * 2.1f);
+      S.balloonR[i] = 2.6f + 1.9f * (float)((hh >> 20) & 15u) / 15.f;
+      S.balloonH[i] = hh;
+    }
+  }
+
+  // Airliners: high, straight, fast, and trailing a contrail that persists
+  // behind them and spreads. The contrail is what sells the altitude.
+  for (int i = 0; i < PixelviewSkyCast::kPlanes; ++i) {
+    float period = 95.f + 37.f * (float)i;
+    uint32_t ep = (uint32_t)(animT / period);
+    uint32_t hh = hash3(ep, 0x50A12u + (uint32_t)i, 0xA12Cu);
+    float age = animT - (float)ep * period;
+    float cross = 34.f;
+    S.planeUp[i] = ((hh % 5u) < 3u) && age < cross;
+    if (S.planeUp[i]) {
+      float p = age / cross;
+      float ang = (float)(hh & 1023u) / 1023.f * 6.283f;
+      float dirx = std::cos(ang), diry = std::sin(ang);
+      float span = fw * 1.9f;
+      float off = ((float)((hh >> 11) & 255u) / 255.f - 0.5f) * fh * 0.85f;
+      S.planeX[i] = fw * 0.5f + dirx * (-span * 0.5f + p * span) - diry * off;
+      S.planeY[i] = fh * 0.5f + diry * (-span * 0.5f + p * span) + dirx * off;
+      S.planeDX[i] = dirx;
+      S.planeDY[i] = diry;
+      S.planeSize[i] = ((hh >> 19) & 1u) ? 1.0f : 0.62f;  // near one / far one
+      S.planeAge[i] = age;
+    }
+  }
+
+  // And rarely, a unicorn. It does not fly in a straight line: it canters
+  // over an arc with a bit of rise and fall, because the whole point of it
+  // is that it is not an aircraft.
+  {
+    float age = 0.f; uint32_t hh = 0u;
+    const float cross = SKY_UNICORN.dwell;
+    S.unicornUp = skyFlyerUp(SKY_UNICORN, animT, &age, &hh);
+    if (S.unicornUp) {
+      float p = age / cross;
+      S.uniDir = ((hh >> 5) & 1u) ? 1.f : -1.f;
+      float lane = 0.24f + 0.42f * (float)((hh >> 8) & 255u) / 255.f;
+      S.uniX = (S.uniDir > 0.f) ? (-8.f + p * (fw + 16.f))
+                                : (fw + 8.f - p * (fw + 16.f));
+      S.uniY = fh * lane - 9.f * std::sin(p * 3.14159f) +
+               1.8f * std::sin(animT * 2.3f);   // the canter
+      S.uniSize = 1.f;
+      S.uniAge = age;
+    }
+  }
+
+  // A UFO. The whole trick is that it does not travel like anything else up
+  // here: a balloon drifts and a plane commits to a heading, so the saucer
+  // HOVERS and then DARTS — holding a spot dead still, then crossing a third
+  // of the sky in under a second and stopping dead again. Motion is the
+  // characterisation; the shape is almost incidental.
+  {
+    float age = 0.f; uint32_t hh = 0u;
+    const float dwell = SKY_UFO.dwell;
+    S.ufoUp = skyFlyerUp(SKY_UFO, animT, &age, &hh);
+    if (S.ufoUp) {
+      // A chain of waypoints; between them it eases with a very sharp curve,
+      // so most of each leg is spent stationary. The FIRST and LAST are off
+      // the panel entirely: it has to arrive from somewhere and leave for
+      // somewhere. Without that it blinked out of existence in mid-air
+      // wherever it happened to be hovering when its dwell ran out.
+      const int kLegs = 8;
+      const float legDur = dwell / (float)kLegs;
+      int leg = std::min((int)(age / legDur), kLegs - 1);
+      float lt = (age - (float)leg * legDur) / legDur;
+      auto wp = [&](int k, float* wx2, float* wy2) {
+        if (k <= 0 || k >= kLegs) {
+          // Off-panel, on the far side of the disc — entry and exit.
+          uint32_t eh = hash3(hh, (k <= 0) ? 0x1Du : 0u, 0x0FFu);
+          float ang = (float)(eh & 1023u) / 1023.f * 6.283f;
+          *wx2 = fw * 0.5f + std::cos(ang) * fw * 0.95f;
+          *wy2 = fh * 0.5f + std::sin(ang) * fh * 0.95f;
+          return;
+        }
+        uint32_t wh = hash3(hh, (uint32_t)k * 2654435761u, 0x0F0Bu);
+        *wx2 = fw * (0.16f + 0.68f * (float)(wh & 1023u) / 1023.f);
+        *wy2 = fh * (0.16f + 0.68f * (float)((wh >> 10) & 1023u) / 1023.f);
+      };
+      float ax, ay, bx2, by2;
+      wp(leg, &ax, &ay);
+      wp(leg + 1, &bx2, &by2);
+      // Hold, snap, hold: a steep smootherstep spends most of the leg
+      // parked. The arrival and departure legs get a longer, earlier ramp,
+      // because covering that distance in the same snap would put it past
+      // the panel in a single frame and look like a glitch rather than a
+      // departure.
+      bool edgeLeg = (leg == 0) || (leg == kLegs - 1);
+      float e = edgeLeg ? std::clamp(lt * 1.25f, 0.f, 1.f)
+                        : std::clamp((lt - 0.62f) / 0.16f, 0.f, 1.f);
+      e = e * e * e * (e * (e * 6.f - 15.f) + 10.f);
+      S.ufoX = ax + (bx2 - ax) * e;
+      S.ufoY = ay + (by2 - ay) * e;
+      S.ufoR = 3.4f + 1.3f * (float)((hh >> 22) & 7u) / 7.f;
+      // It banks into the dart and rights itself again.
+      S.ufoTilt = (bx2 - ax) * 0.010f * std::sin(e * 3.14159f);
+      // How hard it is moving right now, for the streak it drags behind.
+      float de = 30.f * e * (1.f - e) * (e * (1.f - e));   // d/dt of smootherstep
+      S.ufoSpeed = std::clamp(de * 2.2f, 0.f, 1.f);
+      S.ufoVX = bx2 - ax;
+      S.ufoVY = by2 - ay;
+      S.ufoAge = age;
+    }
+  }
+
+  // A dragon, the long eastern kind: it swims through the air rather than
+  // flapping, so the body follows the head down a travelling sine and every
+  // segment lags the one in front. That lag is the whole creature — give
+  // them all the same phase and you get a rigid bar with a face on it.
+  {
+    float age = 0.f; uint32_t hh = 0u;
+    const float cross = SKY_DRAGON.dwell;
+    S.dragonUp = skyFlyerUp(SKY_DRAGON, animT, &age, &hh);
+    if (S.dragonUp) {
+      float p = age / cross;
+      float dir = ((hh >> 3) & 1u) ? 1.f : -1.f;
+      float lane = 0.22f + 0.5f * (float)((hh >> 8) & 255u) / 255.f;
+      float headU = -0.25f + p * 1.5f;                // travel, with margin
+      S.dragHue = hh;
+      for (int i = 0; i < PixelviewSkyCast::kDragonSegs; ++i) {
+        float lag = (float)i * 0.035f;
+        float uu = headU - lag;
+        float sx2 = (dir > 0.f) ? uu * fw : fw - uu * fw;
+        // The body swims: a wave that travels DOWN it, plus a slow overall
+        // rise and fall so it is not pinned to one altitude.
+        float sy2 = fh * lane
+                  + 7.5f * std::sin(uu * 9.0f - animT * 2.1f)
+                  + 4.0f * std::sin(uu * 3.1f + animT * 0.5f);
+        S.dragX[i] = sx2;
+        S.dragY[i] = sy2;
+        // Thick at the shoulders, tapering to the tail.
+        float t2 = (float)i / (float)(PixelviewSkyCast::kDragonSegs - 1);
+        S.dragR[i] = (i == 0) ? 2.5f : 2.15f * (1.f - t2 * 0.78f);
+      }
+    }
+  }
+
+  // A rider, cross-legged on a small golden cloud of their own.
+  {
+    float age = 0.f; uint32_t hh = 0u;
+    const float cross = SKY_RIDER.dwell;
+    S.riderUp = skyFlyerUp(SKY_RIDER, animT, &age, &hh);
+    if (S.riderUp) {
+      float p = age / cross;
+      S.riderDir = ((hh >> 4) & 1u) ? 1.f : -1.f;
+      float lane = 0.20f + 0.55f * (float)((hh >> 9) & 255u) / 255.f;
+      S.riderX = (S.riderDir > 0.f) ? (-10.f + p * (fw + 20.f))
+                                    : (fw + 10.f - p * (fw + 20.f));
+      S.riderY = fh * lane + 3.0f * std::sin(animT * 1.2f);
+    }
+  }
+
+  // A witch on a broomstick, with something small riding the tail. She
+  // keeps unsociable hours: mostly around dusk and after dark.
+  {
+    float age = 0.f; uint32_t hh = 0u;
+    const float cross = SKY_WITCH.dwell;
+    S.witchUp = skyFlyerUp(SKY_WITCH, animT, &age, &hh);
+    if (S.witchUp) {
+      float p = age / cross;
+      S.witchDir = ((hh >> 6) & 1u) ? 1.f : -1.f;
+      float lane = 0.18f + 0.5f * (float)((hh >> 11) & 255u) / 255.f;
+      S.witchX = (S.witchDir > 0.f) ? (-12.f + p * (fw + 24.f))
+                                    : (fw + 12.f - p * (fw + 24.f));
+      // She swoops — a long shallow dive and climb across the crossing.
+      S.witchY = fh * lane - 10.f * std::sin(p * 3.14159f * 1.5f);
+      S.witchAge = age;
+    }
+  }
+
+  // A skein in proper V FORMATION, not a scatter of dots. Birds fly in a
+  // vee because each one rides the vortex off the wingtip ahead, and drawn
+  // that way a handful of pixels reads instantly as birds — a random cloud
+  // of the same pixels reads as dirt on the panel. Every few passes the
+  // skein is flamingos, which are the same shape in a much better colour.
+  {
+    float lead = animT * 0.30f;
+    uint32_t fh2 = hash3((uint32_t)(animT / 210.f), 0xF1A3u, 0x60u);
+    S.flamingo = (fh2 % 3u) == 0u;
+    // The whole formation crosses on a slow diagonal and wraps.
+    float span = fw + 44.f;
+    float lx = std::fmod(lead * 7.f, span) - 22.f;
+    float ly = fh * (0.30f + 0.16f * std::sin(lead * 0.5f));
+    for (int i = 0; i < PixelviewSkyCast::kBirds; ++i) {
+      // Alternate sides of the vee, stepping back and out.
+      int rank = (i + 1) / 2;
+      float side = (i == 0) ? 0.f : ((i & 1) ? -1.f : 1.f);
+      float bob = 0.7f * std::sin(animT * 3.4f + (float)i * 0.8f);
+      S.birdX[i] = lx - (float)rank * 2.6f;
+      S.birdY[i] = ly + side * (float)rank * 1.9f + bob;
+    }
+  }
+  return S;
+}
+
+// The whole sky, for one cell. Returns the colour directly — there is no
+// terrain underneath to blend with, so this replaces the palette outright
+// the way ALIEN does rather than tinting anything.
+inline void pixelviewSkyCell(const World& w, int x, int y, float animT,
+                             const Daylight& dl, float& rr, float& gg,
+                             float& bb) {
+  const float fw = (float)W, fh = (float)H;
+  const float fx = (float)x, fy = (float)y;
+  float br = displayBrightness();
+
+  // ---- The air itself ----
+  // Looking up, the deepest colour is at the zenith and it pales toward the
+  // horizon all round, because you are looking through more atmosphere at a
+  // shallower angle. On a round panel that is a radial ramp, which happily
+  // is also the shape of the panel.
+  float dxc = (fx - fw * 0.5f) / (fw * 0.5f);
+  float dyc = (fy - fh * 0.5f) / (fh * 0.5f);
+  float rad = std::sqrt(dxc * dxc + dyc * dyc);
+  float horizon = std::clamp(rad, 0.f, 1.f);
+  horizon = horizon * horizon;
+
+  // Day colour, dusk colour, night colour — picked by the same daylight the
+  // rest of the vat runs on, so the sky agrees with every other biome about
+  // what time it is.
+  float lv = std::clamp(dl.level, 0.f, 1.f);
+  float warm = dl.warm > 0.f ? dl.warm : 0.f;
+
+  float zr = 38.f, zg = 96.f, zb = 176.f;     // zenith, noon
+  float hr = 152.f, hg = 196.f, hb = 232.f;   // horizon haze, noon
+  // Golden hour drags the horizon through amber and the zenith through rose.
+  zr += 44.f * warm; zg += 2.f * warm;  zb -= 34.f * warm;
+  hr += 74.f * warm; hg += 6.f * warm;  hb -= 96.f * warm;
+  // Night: deep blue, not black — a night sky still reads as sky.
+  float nightMix = 1.f - lv;
+  zr = zr * (1.f - nightMix) + 6.f * nightMix;
+  zg = zg * (1.f - nightMix) + 10.f * nightMix;
+  zb = zb * (1.f - nightMix) + 34.f * nightMix;
+  hr = hr * (1.f - nightMix) + 16.f * nightMix;
+  hg = hg * (1.f - nightMix) + 22.f * nightMix;
+  hb = hb * (1.f - nightMix) + 52.f * nightMix;
+
+  rr = zr + (hr - zr) * horizon;
+  gg = zg + (hg - zg) * horizon;
+  bb = zb + (hb - zb) * horizon;
+
+  // ---- Stars ----
+  if (lv < 0.45f) {
+    float sNight = (0.45f - lv) / 0.45f;
+    uint32_t sh = hash3((uint32_t)x, (uint32_t)y, w.worldSeed ^ 0x57A25u);
+    if ((sh % 190u) == 0u) {
+      float tw = 0.55f + 0.45f * std::sin(animT * 1.7f + (float)(sh & 63u));
+      float p = sNight * tw * br;
+      rr += 190.f * p; gg += 200.f * p; bb += 225.f * p;
+    }
+  }
+
+  // ---- Cloud layers ----
+  // Three decks at different heights, drifting at different speeds. The
+  // parallax between them is the entire illusion of depth: one layer of
+  // noise, however pretty, reads as a texture on a flat wall.
+  float wx = (w.wind.dx == 0 && w.wind.dy == 0) ? 0.55f : (float)w.wind.dx;
+  float wy = (float)w.wind.dy;
+  float wind = 0.85f + 0.35f * (float)w.wind.strength;
+
+  // Coverage is per-deck, but what you SEE is the union of three, and the
+  // union of three half-covered decks is a 90% overcast. Each one has to be
+  // sparse for the sky to stay a sky: at 0.24/0.26/0.18 roughly half the
+  // panel is open air, which is what lets the blue read and gives the
+  // traffic something to cross.
+  // `stretch` elongates the deck ALONG the wind: cirrus is combed out into
+  // long streaks by the fast air it sits in, while the low cumulus is much
+  // closer to round.
+  struct Deck { float scale, speed, cover, soft, lit, stretch; };
+  static const Deck decks[3] = {
+      // High cirrus: thin, fast, wispy, barely there.
+      {30.f, 1.55f, 0.36f, 0.30f, 1.06f, 3.4f},
+      // Mid deck: the classic fair-weather cumulus field.
+      {19.f, 0.85f, 0.37f, 0.17f, 1.00f, 1.9f},
+      // Low and close: big, slow, and it passes right over you.
+      {11.f, 0.42f, 0.28f, 0.12f, 0.94f, 1.35f},
+  };
+
+  // The wind's frame — everything below is sampled along/across it.
+  float wlen = std::sqrt(wx * wx + wy * wy);
+  if (wlen < 0.001f) { wx = 1.f; wy = 0.f; wlen = 1.f; }
+  float ca = wx / wlen, sa = wy / wlen;
+
+  // The sun's azimuth swings through the day, so the relief on the clouds
+  // turns with it: side-lit at dawn and dusk, when a sky looks best.
+  float sunA = 3.14159f * (0.25f + 0.5f * std::clamp(lv, 0.f, 1.f)) +
+               (warm > 0.f ? 0.6f : 0.f);
+  float sunX = std::cos(sunA), sunY = std::sin(sunA);
+
+  for (int L = 0; L < 3; ++L) {
+    const Deck& D = decks[L];
+    // Drift: this deck's own speed. The parallax between the three is the
+    // depth cue, so they must not share a rate.
+    float drift = animT * D.speed * wind * 2.4f * wlen;
+    float px2 = (float)x - ca * drift;
+    float py2 = (float)y - sa * drift;
+    // Into the wind's frame, then STRETCHED along it. Wind shears a cloud
+    // out in the direction it is pushing, and that elongation is most of
+    // what makes even a still frame look like it is being blown.
+    float u = px2 * ca + py2 * sa;
+    float v = -px2 * sa + py2 * ca;
+    float stretch = D.stretch * (1.f + 0.45f * (float)w.wind.strength);
+    uint32_t salt = w.worldSeed ^ (0x51000u + (uint32_t)L * 0x77u);
+    auto field = [&](float uu, float vv) {
+      return pixelviewCloudF(uu / stretch, vv, D.scale, salt);
+    };
+    float n = field(u, v);
+
+    // The world's own weather opens and closes the sky, so an overcast in
+    // the sim is an overcast up here too.
+    float cover = D.cover + 0.20f * w.weather.rainStrength +
+                  0.05f * std::sin(animT * 0.033f + (float)L);
+    float thr = 1.f - cover;
+    float a = std::clamp((n - thr) / std::max(0.04f, D.soft), 0.f, 1.f);
+    if (a <= 0.f) continue;
+    a = a * a * (3.f - 2.f * a);
+
+    // DEPTH, not merely coverage. How far past the threshold a cell sits
+    // stands in for how much cloud is stacked above it, so a cumulus has a
+    // solid core and a thin edge you can nearly see through. Flat opacity
+    // is what made them read as paper cut-outs.
+    float depth = std::clamp((n - thr) / 0.22f, 0.f, 1.f);
+
+    // Shading from the real GRADIENT of the field, lit from the sun's
+    // azimuth, instead of one offset sample. Where the cloud rises toward
+    // the sun it catches light; the lee side falls into its own shadow.
+    const float e2 = 1.6f;
+    float gu = field(u + e2, v) - field(u - e2, v);
+    float gv = field(u, v + e2) - field(u, v - e2);
+    float gx2 = gu * ca - gv * sa;      // gradient back into world axes
+    float gy2 = gu * sa + gv * ca;
+    float lit = std::clamp(0.5f + (gx2 * sunX + gy2 * sunY) * 7.0f, 0.f, 1.f);
+
+    // From below you are looking at undersides, so the base sits in shade
+    // and only the shoulders take the sun. A cloud's shadow is lit by the
+    // sky, so it is never neutral grey and never black.
+    float body = 132.f + (252.f - 132.f) * (0.30f + 0.70f * lit);
+    body *= 0.80f + 0.20f * depth;      // thin edges are translucent
+
+    float cr = body * D.lit, cg = body * D.lit, cb = body * D.lit;
+    cr += (-14.f + 40.f * lit) * (0.35f + warm);
+    cg += ( -9.f + 24.f * lit) * (0.35f + warm);
+    cb += ( 20.f - 14.f * lit);
+    // Night: clouds are darker than the sky they cross, not brighter.
+    cr = cr * lv + (cr * 0.10f + 14.f) * (1.f - lv);
+    cg = cg * lv + (cg * 0.10f + 17.f) * (1.f - lv);
+    cb = cb * lv + (cb * 0.12f + 30.f) * (1.f - lv);
+
+    // Thin edges blend less, so cloud fades into sky instead of ending on
+    // a hard line.
+    float alpha = a * (0.55f + 0.45f * depth);
+    rr += (cr - rr) * alpha;
+    gg += (cg - gg) * alpha;
+    bb += (cb - bb) * alpha;
+  }
+
+  // ---- The wind made visible ----
+  // Long faint streaks combed out along the wind, drifting faster than any
+  // deck. Alone they are nearly invisible; what they do is give the eye
+  // something unambiguously moving and unambiguously DIRECTIONAL, so the
+  // clouds read as being pushed rather than as a texture that slides.
+  {
+    float sp = 5.5f * (0.6f + 0.5f * (float)w.wind.strength);
+    float pu = ((float)x * ca + (float)y * sa) - animT * sp;
+    float pv = -(float)x * sa + (float)y * ca;
+    float s = pixelviewValueNoiseF(pu / 9.0f, pv, 15.f, w.worldSeed ^ 0x71DDu);
+    if (s > 0.80f) {
+      float k = (s - 0.80f) / 0.20f * 0.15f * (0.4f + 0.6f * lv);
+      rr += (250.f - rr) * k;
+      gg += (252.f - gg) * k;
+      bb += (255.f - bb) * k;
+    }
+  }
+
+  // ---- Traffic ----
+  const PixelviewSkyCast& S = pixelviewSkyCast(animT);
+  auto paint = [&](float pr, float pg, float pb, float amt) {
+    amt = std::clamp(amt, 0.f, 1.f);
+    rr += (pr * br - rr) * amt;
+    gg += (pg * br - gg) * amt;
+    bb += (pb * br - bb) * amt;
+  };
+
+  // Contrails first: everything else flies in front of them.
+  for (int i = 0; i < PixelviewSkyCast::kPlanes; ++i) {
+    if (!S.planeUp[i] || S.planeSize[i] < 0.8f) continue;
+    float relx = fx - S.planeX[i], rely = fy - S.planeY[i];
+    float along = -(relx * S.planeDX[i] + rely * S.planeDY[i]);   // behind
+    float across = relx * S.planeDY[i] - rely * S.planeDX[i];
+    // Length scales with the WORLD, and stays a fraction of it. A flat 130
+    // cells was written against a 200-cell world; on the 140-cell panel a
+    // vertically-travelling plane drew an unbroken line from one edge of the
+    // disc to the other, which reads as a scratch — or a river in the sky.
+    const float trailLen = (float)W * 0.26f;
+    if (along < 1.f || along > trailLen) continue;
+    float spread = 0.30f + along * (2.2f / trailLen);   // widens as it ages
+    float fade = std::clamp(1.f - along / trailLen, 0.f, 1.f);
+    float core = std::clamp(1.f - std::fabs(across) / spread, 0.f, 1.f);
+    if (core <= 0.f) continue;
+    // It breaks up downwind rather than ending in a clean line.
+    uint32_t ch = hash3((uint32_t)x, (uint32_t)y, 0xC047A11u);
+    float ragged = 0.55f + 0.45f * (float)(ch & 255u) / 255.f;
+    paint(238.f, 244.f, 250.f, core * fade * fade * 0.55f * ragged);
+  }
+
+  // Birds: seen from below they are silhouettes, but a hard near-black
+  // pixel on bright sky is indistinguishable from a dead LED, so they stay
+  // soft-edged and only part-opaque — far more like a distant bird than a
+  // full-strength dot ever looked.
+  for (int i = 0; i < PixelviewSkyCast::kBirds; ++i) {
+    float dbx = fx - S.birdX[i], dby = fy - S.birdY[i];
+    // Wings, not dots: the beat opens and closes the span, so the shape
+    // stretches sideways and snaps back. Each bird is offset in the cycle,
+    // because a formation beating in unison looks mechanical.
+    float flap = std::sin(animT * 6.5f + (float)i * 0.9f);
+    float span = 1.05f + 0.85f * std::fabs(flap);
+    float u2 = dbx / span, v2 = dby / 0.55f;
+    float d2b = u2 * u2 + v2 * v2;
+    if (d2b < 1.f) {
+      float soft = std::clamp(1.f - d2b, 0.f, 1.f);
+      if (S.flamingo) {
+        // Flamingos: pink, and paler where the light comes through the
+        // flight feathers, with black tips.
+        float edge = std::clamp(std::fabs(u2), 0.f, 1.f);
+        if (edge > 0.72f) paint(48.f, 34.f, 44.f, 0.85f * soft);        // tips
+        else paint(246.f - 30.f * edge, 128.f + 26.f * edge,
+                   156.f + 20.f * edge, 0.92f * soft);
+      } else {
+        float lit2 = 0.5f + 0.5f * flap;
+        paint(78.f + 40.f * lit2, 84.f + 40.f * lit2, 104.f + 40.f * lit2,
+              0.72f * soft);
+      }
+    }
+  }
+
+  // Balloons: envelope, banded; a basket under it.
+  for (int i = 0; i < PixelviewSkyCast::kBalloons; ++i) {
+    if (!S.balloonUp[i]) continue;
+    float R = S.balloonR[i];
+    float dbx = fx - S.balloonX[i], dby = fy - S.balloonY[i];
+    // Envelope: a touch taller than wide, and narrowing at the bottom.
+    float v = dby / (R * 1.15f);
+    float taper = 1.f - 0.45f * std::max(0.f, v);
+    float u = dbx / std::max(0.25f, R * taper);
+    float d2 = u * u + v * v;
+    if (d2 < 1.f) {
+      uint32_t bh = S.balloonH[i];
+      // Gore angle and height band — the two coordinates any balloon
+      // pattern is actually painted in.
+      float goreF = std::atan2(dbx, -dby) * 2.6f;
+      int gore = (int)std::floor(goreF) + 8;
+      float band = v * 2.4f;                       // 0 at the crown, down
+      float shade = 0.72f + 0.28f * std::clamp(1.f - d2 * 0.9f, 0.f, 1.f);
+      shade *= 0.80f + 0.20f * (0.5f - u * 0.5f);  // lit from one side
+
+      static const uint8_t kEnv[8][6] = {
+          {228, 64, 72,  248, 196, 92},    // red / gold
+          {60, 128, 208, 246, 246, 238},   // blue / white
+          {236, 132, 48, 250, 224, 120},   // orange / cream
+          {96, 176, 96, 240, 236, 176},    // green / straw
+          {186, 92, 196, 250, 214, 236},   // violet / pink
+          {40, 148, 156, 244, 236, 200},   // teal / bone
+          {232, 88, 140, 252, 236, 244},   // rose / shell
+          {250, 206, 64, 70, 74, 96},      // gold / slate
+      };
+      static const uint8_t kRainbow[6][3] = {
+          {232, 66, 62}, {244, 148, 52}, {248, 218, 74},
+          {104, 196, 104}, {74, 150, 232}, {172, 104, 216}};
+
+      // Every balloon gets its OWN pattern, not just its own two colours —
+      // an envelope is a made object and no two crews build the same one.
+      // Five ways of dividing the same envelope: vertical gores, horizontal
+      // bands, a chequer of the two, a plain cap over a band, and rainbow.
+      float pr, pg, pb;
+      uint32_t style = (bh >> 3) % 5u;
+      const uint8_t* pal = kEnv[bh % 8u];
+      if (style == 4u) {
+        // Rainbow: the bands run round the envelope, warm at the crown.
+        int k = (int)std::floor(band + 0.5f);
+        k = (k % 6 + 6) % 6;
+        pr = kRainbow[k][0]; pg = kRainbow[k][1]; pb = kRainbow[k][2];
+      } else {
+        int pick;
+        if (style == 0u)      pick = gore & 1;                    // gores
+        else if (style == 1u) pick = ((int)std::floor(band) & 1);  // bands
+        else if (style == 2u) pick = (gore ^ (int)std::floor(band)) & 1;  // chequer
+        else                  pick = (band < -0.35f) ? 0 : 1;      // capped
+        const uint8_t* c2 = pal + (pick ? 3 : 0);
+        pr = c2[0]; pg = c2[1]; pb = c2[2];
+      }
+      paint(pr * shade, pg * shade, pb * shade, 1.f);
+    } else {
+      // Basket, hanging below on its lines.
+      float bx2 = dbx, by2 = dby - R * 1.55f;
+      if (std::fabs(bx2) < R * 0.28f && std::fabs(by2) < R * 0.22f)
+        paint(122.f, 82.f, 46.f, 1.f);
+      else if (std::fabs(bx2) < R * 0.62f && by2 > -R * 0.30f &&
+               by2 < R * 0.02f && ((x + y) & 1))
+        paint(150.f, 130.f, 96.f, 0.5f);      // the rigging, suggested
+    }
+  }
+
+  // Airliners: a fuselage and a wing, aligned to travel.
+  for (int i = 0; i < PixelviewSkyCast::kPlanes; ++i) {
+    if (!S.planeUp[i]) continue;
+    float sz = S.planeSize[i];
+    float relx = fx - S.planeX[i], rely = fy - S.planeY[i];
+    float along = relx * S.planeDX[i] + rely * S.planeDY[i];
+    float across = relx * S.planeDY[i] - rely * S.planeDX[i];
+    bool body = std::fabs(along) < 2.2f * sz && std::fabs(across) < 0.62f * sz;
+    bool wing = std::fabs(along) < 0.72f * sz && std::fabs(across) < 1.9f * sz;
+    bool tail = along < -1.3f * sz && along > -2.3f * sz &&
+                std::fabs(across) < 1.15f * sz;
+    if (body || wing || tail) {
+      float lit = 0.86f + 0.14f * std::clamp(across, -1.f, 1.f);
+      paint(226.f * lit, 230.f * lit, 238.f * lit, 1.f);
+    } else if (lv < 0.4f) {
+      // Nav lights, at night: red to port, green to starboard, and a
+      // strobe. At this scale they are most of what you see.
+      float bl = (std::sin(animT * 3.4f) > 0.72f) ? 1.f : 0.25f;
+      if (std::fabs(along) < 0.7f * sz && std::fabs(across - 1.9f * sz) < 0.8f)
+        paint(60.f, 240.f, 90.f, 0.9f * bl);
+      if (std::fabs(along) < 0.7f * sz && std::fabs(across + 1.9f * sz) < 0.8f)
+        paint(250.f, 60.f, 55.f, 0.9f * bl);
+    }
+  }
+
+  // The dragon. Drawn tail-first so the head lands on top of the neck.
+  if (S.dragonUp) {
+    static const uint8_t kScale[3][6] = {
+        { 62, 168, 108,  180, 246, 176},   // jade / pale green
+        {188,  56,  62,  250, 206, 120},   // crimson / gold
+        { 78, 126, 214,  198, 232, 250},   // lapis / ice
+    };
+    const uint8_t* pal = kScale[S.dragHue % 3u];
+    for (int i = PixelviewSkyCast::kDragonSegs - 1; i >= 0; --i) {
+      float ddx = fx - S.dragX[i], ddy = fy - S.dragY[i];
+      float R = S.dragR[i];
+      float d2 = (ddx * ddx + ddy * ddy) / (R * R);
+      if (d2 >= 1.f) continue;
+      // Rounded body with a lighter belly ridge along the underside.
+      float belly = std::clamp((ddy / R) * 1.4f, -1.f, 1.f);
+      float k = std::clamp(0.5f + belly * 0.5f, 0.f, 1.f);
+      float shade = 0.80f + 0.20f * (1.f - d2);
+      float cr2 = (pal[0] + (pal[3] - pal[0]) * k) * shade;
+      float cg2 = (pal[1] + (pal[4] - pal[1]) * k) * shade;
+      float cb2 = (pal[2] + (pal[5] - pal[2]) * k) * shade;
+      paint(cr2, cg2, cb2, 1.f);
+      if (i == 0) {
+        // The head: a brighter brow, a hot eye, and a horn swept back.
+        if (ddy < -R * 0.25f && std::fabs(ddx) < R * 0.75f)
+          paint(cr2 * 1.12f, cg2 * 1.10f, cb2 * 1.06f, 0.8f);
+        if (std::fabs(ddx - R * 0.30f) < 0.75f &&
+            std::fabs(ddy + R * 0.10f) < 0.75f)
+          paint(255.f, 196.f, 70.f, 1.f);
+      }
+      // A mane runs the first third of the body.
+      if (i > 0 && i < 6 && ddy < -R * 0.55f) {
+        float m = 0.6f + 0.4f * std::sin(animT * 3.f + (float)i);
+        paint(250.f, 232.f, 170.f, 0.55f * m);
+      }
+    }
+    // Whiskers, trailing back from the head.
+    {
+      float hx2 = S.dragX[0], hy2 = S.dragY[0];
+      for (int s2 = -1; s2 <= 1; s2 += 2) {
+        for (int t3 = 1; t3 <= 7; ++t3) {
+          float wxx = hx2 - (S.dragX[0] - S.dragX[1]) * (float)t3 * 0.55f;
+          float wyy = hy2 + (float)s2 * (1.4f + 0.5f * (float)t3) +
+                      1.1f * std::sin(animT * 2.6f + (float)t3 * 0.6f);
+          if (std::fabs(fx - wxx) < 0.6f && std::fabs(fy - wyy) < 0.6f)
+            paint(250.f, 236.f, 186.f, 0.8f);
+        }
+      }
+    }
+  }
+
+  // The rider on their own little cloud.
+  if (S.riderUp) {
+    float d = S.riderDir;
+    float rx2 = (fx - S.riderX) * d, ry2 = fy - S.riderY;
+    // The cloud: a small flat golden puff.
+    float cu = rx2 / 4.2f, cv = (ry2 - 1.4f) / 1.5f;
+    if (cu * cu + cv * cv < 1.f) {
+      float g2 = 0.82f + 0.18f * std::sin(animT * 2.f + rx2 * 0.5f);
+      paint(252.f * g2, 216.f * g2, 96.f * g2, 1.f);
+    }
+    // The rider: legs crossed, a small body, and a spiked silhouette.
+    if (std::fabs(rx2) < 1.3f && ry2 > -1.6f && ry2 < 0.4f)
+      paint(238.f, 130.f, 44.f, 1.f);                    // body
+    if (std::fabs(rx2) < 1.0f && ry2 > -2.9f && ry2 < -1.5f)
+      paint(246.f, 206.f, 160.f, 1.f);                   // head
+    // Hair, in spikes.
+    for (int k = -2; k <= 2; ++k) {
+      float sxk = rx2 - (float)k * 0.85f;
+      float syk = ry2 + 3.5f + 0.55f * std::fabs((float)k);
+      if (std::fabs(sxk) < 0.55f && std::fabs(syk) < 0.85f)
+        paint(46.f, 38.f, 44.f, 1.f);
+    }
+  }
+
+  // The witch. She reads almost entirely as silhouette — a hat, a hunched
+  // figure, a broom line and a streaming cloak — because at this size a
+  // shape you recognise beats any amount of detail you cannot see.
+  if (S.witchUp) {
+    float d = S.witchDir;
+    float wx2 = (fx - S.witchX) * d, wy2 = fy - S.witchY;
+    const float ink = 34.f, ink2 = 40.f, ink3 = 58.f;
+    // Broom handle, angled, with bristles at the back.
+    float handle = wy2 - (0.22f * wx2);
+    if (wx2 > -6.5f && wx2 < 4.2f && std::fabs(handle - 0.9f) < 0.55f)
+      paint(122.f, 84.f, 46.f, 1.f);
+    if (wx2 > -9.5f && wx2 <= -6.0f) {
+      float spread = 1.5f * (-wx2 - 6.0f) / 3.5f;
+      if (std::fabs(handle - 0.9f) < 0.5f + spread)
+        paint(186.f, 148.f, 78.f, 0.92f);
+    }
+    // Figure.
+    if (std::fabs(wx2) < 1.25f && wy2 > -2.2f && wy2 < 0.9f)
+      paint(ink, ink2, ink3, 1.f);
+    if (std::fabs(wx2 - 0.2f) < 0.95f && wy2 > -3.4f && wy2 < -2.0f)
+      paint(ink, ink2, ink3, 1.f);                      // head
+    // The hat: a brim and a leaning cone.
+    if (std::fabs(wx2 - 0.2f) < 2.1f && std::fabs(wy2 + 3.6f) < 0.5f)
+      paint(ink, ink2, ink3, 1.f);
+    for (int t3 = 0; t3 < 4; ++t3) {
+      float hxk = wx2 - 0.1f + (float)t3 * 0.42f;
+      float hyk = wy2 + 4.1f + (float)t3 * 0.75f;
+      if (std::fabs(hxk) < 0.85f - (float)t3 * 0.16f && std::fabs(hyk) < 0.6f)
+        paint(ink, ink2, ink3, 1.f);
+    }
+    // Cloak, streaming behind and rippling.
+    for (int t3 = 1; t3 <= 6; ++t3) {
+      float cxk = wx2 + (float)t3 * 1.0f;
+      float cyk = wy2 - 0.4f - 0.8f * std::sin((float)t3 * 0.7f - animT * 4.f);
+      float thick = 1.15f - (float)t3 * 0.13f;
+      if (std::fabs(cxk) < 0.62f && std::fabs(cyk) < thick)
+        paint(ink + 14.f, ink2 + 10.f, ink3 + 18.f, 0.92f);
+    }
+    // And a companion riding the bristles.
+    if (std::fabs(wx2 + 7.3f) < 0.85f && std::fabs(handle - 0.1f) < 0.85f)
+      paint(28.f, 26.f, 34.f, 1.f);
+  }
+
+  // The UFO: a hull with a dome, a ring of running lights, and a beam it
+  // occasionally puts down through the cloud below it.
+  if (S.ufoUp) {
+    float R = S.ufoR;
+    float dux = fx - S.ufoX, duy = fy - S.ufoY;
+    // Bank: rotate into the direction of travel.
+    float ct = std::cos(S.ufoTilt), st = std::sin(S.ufoTilt);
+    float hx = dux * ct + duy * st;
+    float hy = -dux * st + duy * ct;
+
+    // A streak trailing the dart. At 60fps a craft crossing a third of the
+    // panel in a fraction of a second moves further between frames than its
+    // own diameter, so without a trail the eye sees it teleport rather than
+    // travel — the smear is what makes the speed legible.
+    if (S.ufoSpeed > 0.05f) {
+      float vl = std::sqrt(S.ufoVX * S.ufoVX + S.ufoVY * S.ufoVY);
+      if (vl > 0.001f) {
+        float nx = S.ufoVX / vl, ny = S.ufoVY / vl;
+        float behind = -(dux * nx + duy * ny);      // along the trail
+        float across2 = dux * ny - duy * nx;
+        float len = R * 9.f * S.ufoSpeed;
+        if (behind > 0.f && behind < len &&
+            std::fabs(across2) < R * 0.55f) {
+          float k = (1.f - behind / len) * S.ufoSpeed * 0.5f *
+                    (1.f - std::fabs(across2) / (R * 0.55f));
+          paint(170.f, 226.f, 236.f, k);
+        }
+      }
+    }
+
+    // The beam, first, so the craft paints over it.
+    float beamLen = R * 4.2f;
+    float beamPhase = std::sin(S.ufoAge * 0.55f);
+    if (beamPhase > 0.55f && hy > 0.f && hy < beamLen) {
+      float t2 = hy / beamLen;
+      float halfW = R * (0.30f + 0.85f * t2);
+      if (std::fabs(hx) < halfW) {
+        float p = (1.f - t2) * (beamPhase - 0.55f) / 0.45f * 0.42f *
+                  (1.f - std::fabs(hx) / halfW);
+        paint(190.f, 255.f, 205.f, p);
+      }
+    }
+
+    // Hull: a flattened ellipse.
+    float hu = hx / (R * 1.9f), hv = hy / (R * 0.52f);
+    bool hull = (hu * hu + hv * hv) < 1.f;
+    // Dome on top.
+    float du2 = hx / (R * 0.80f), dv2 = (hy + R * 0.42f) / (R * 0.62f);
+    bool dome = (du2 * du2 + dv2 * dv2) < 1.f && hy < R * 0.1f;
+
+    if (dome) {
+      float g2 = 0.55f + 0.45f * std::sin(S.ufoAge * 2.2f);
+      paint(150.f + 60.f * g2, 232.f, 220.f, 1.f);
+    } else if (hull) {
+      // Brushed metal, lit from above, dark underneath.
+      float lit = std::clamp(0.5f - hv * 0.55f, 0.f, 1.f);
+      float base = 74.f + 96.f * lit;
+      paint(base * 0.92f, base * 0.98f, base * 1.06f, 1.f);
+      // Running lights around the rim, chasing.
+      if (hv > 0.15f) {
+        float ring = std::sin(hx * 1.5f - S.ufoAge * 7.f);
+        if (ring > 0.80f) {
+          uint32_t lh = (uint32_t)((hx + 64.f) * 0.5f);
+          switch (lh % 3u) {
+            case 0:  paint(255.f, 90.f, 90.f, 0.95f); break;
+            case 1:  paint(120.f, 255.f, 140.f, 0.95f); break;
+            default: paint(140.f, 190.f, 255.f, 0.95f); break;
+          }
+        }
+      }
+    }
+  }
+
+  // The unicorn.
+  if (S.unicornUp) {
+    float sz = S.uniSize;
+    float dux = (fx - S.uniX) * S.uniDir, duy = fy - S.uniY;
+    auto blob = [&](float bx2, float by2, float rx2, float ry2) {
+      float ux = (dux - bx2) / rx2, uy = (duy - by2) / ry2;
+      return ux * ux + uy * uy < 1.f;
+    };
+    // Legs first (they are behind), then barrel, neck, head, horn, mane.
+    float gait = std::sin(animT * 7.0f) * 1.5f;
+    bool leg = false;
+    for (int L = 0; L < 4; ++L) {
+      float lx = (L < 2 ? -1.9f : 1.7f) * sz;
+      float sw = ((L & 1) ? gait : -gait) * 0.5f;
+      if (blob(lx + sw, 2.3f * sz, 0.55f * sz, 1.5f * sz)) leg = true;
+    }
+    bool barrel = blob(0.f, 0.f, 3.3f * sz, 1.7f * sz);
+    bool neck   = blob(2.6f * sz, -1.9f * sz, 1.1f * sz, 1.7f * sz);
+    bool head   = blob(3.7f * sz, -3.3f * sz, 1.4f * sz, 0.95f * sz);
+    bool horn   = blob(4.9f * sz, -4.5f * sz, 0.95f * sz, 0.42f * sz);
+    bool tail2  = blob(-3.7f * sz, -0.9f * sz, 1.3f * sz, 1.0f * sz);
+
+    if (horn) {
+      float shimmer = 0.7f + 0.3f * std::sin(animT * 4.f + fx * 0.4f);
+      paint(255.f, 232.f, 150.f * shimmer + 90.f, 1.f);
+    } else if (head || neck || barrel || leg) {
+      // White, but not flat white: it takes the sky's own light.
+      float shade = 0.88f + 0.12f * std::sin(dux * 0.5f + duy * 0.7f);
+      paint(248.f * shade, 246.f * shade, 252.f * shade, 1.f);
+    } else if (tail2) {
+      // Mane and tail: the one place it is allowed to be a rainbow.
+      float band = duy * 0.55f + dux * 0.30f + animT * 1.1f;
+      int k = ((int)std::floor(band) % 6 + 6) % 6;
+      static const uint8_t kMane[6][3] = {
+          {236, 82, 96}, {246, 158, 70}, {248, 226, 96},
+          {110, 208, 122}, {96, 168, 240}, {186, 122, 226}};
+      paint((float)kMane[k][0], (float)kMane[k][1], (float)kMane[k][2], 0.95f);
+    }
+    // A few sparkles trailing off it.
+    uint32_t gh = hash3((uint32_t)(x + (int)(animT * 3.f)), (uint32_t)y,
+                        0x5A2C1Eu);
+    if (dux < 0.f && dux > -14.f * sz && std::fabs(duy) < 5.f * sz &&
+        (gh % 60u) == 0u) {
+      float tw = 0.5f + 0.5f * std::sin(animT * 5.f + (float)(gh & 31u));
+      paint(255.f, 246.f, 210.f, 0.75f * tw);
+    }
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -639,9 +1588,11 @@ inline void pixelviewBiomeGrade(Biome bi, int& r, int& g, int& b) {
   float fr = (float)r, fg = (float)g, fb = (float)b;
   switch (bi) {
     case MEADOW:
-      // Sunlit hay: warm yellow-greens, the blue pulled right out.
-      fr *= 1.12f; fg *= 1.08f; fb *= 0.76f;
-      fr += 8.f; fg += 7.f;
+      // Sunlit hay: warm yellow-greens. The blue used to be pulled right
+      // out (x0.76), which is what left bare ground reading as mud under
+      // the grass instead of as dry earth standing in the same light.
+      fr *= 1.10f; fg *= 1.07f; fb *= 0.86f;
+      fr += 6.f; fg += 6.f; fb += 2.f;
       break;
     case WETLAND:
       // Peat and shade: deep blue-greens, everything a stop darker.
@@ -649,24 +1600,28 @@ inline void pixelviewBiomeGrade(Biome bi, int& r, int& g, int& b) {
       fb += 10.f; fg += 4.f;
       break;
     case ALPINE: {
-      // Thin air: sage and lichen, desaturated toward blue-grey rock.
+      // Thin air: sage and lichen over blue-grey stone. The blue push was
+      // hard enough (x1.14, +12) that scree came out periwinkle on its own,
+      // and autumn's warm nudge on top turned the whole mountain lilac.
       float grey = 0.30f * fr + 0.59f * fg + 0.11f * fb;
       fr = fr * 0.58f + grey * 0.42f;
-      fg = fg * 0.62f + grey * 0.38f;
+      fg = fg * 0.64f + grey * 0.36f;
       fb = fb * 0.58f + grey * 0.42f;
-      fr *= 0.94f; fb *= 1.14f;
-      fb += 12.f;
+      fr *= 0.96f; fg *= 1.02f; fb *= 1.05f;
+      fb += 5.f;
       break;
     }
     case TROPICAL:
       // Rainforest: saturated jade, dark under the canopy.
-      fr *= 0.78f; fg *= 1.12f; fb *= 0.88f;
+      fr *= 0.80f; fg *= 1.10f; fb *= 0.90f;
       fg += 6.f;
       break;
     case DESERT:
-      // Everything bakes: ochre and rose, greens only in the cactus.
-      fr *= 1.10f; fg *= 1.00f; fb *= 0.78f;
-      fr += 8.f; fg += 3.f;
+      // Everything bakes: ochre and rose, greens only in the cactus. Keeping
+      // a little blue in the sand is what stops a whole frame of it reading
+      // as one flat sheet of highlighter.
+      fr *= 1.08f; fg *= 1.00f; fb *= 0.87f;
+      fr += 6.f; fg += 3.f; fb += 2.f;
       break;
     default:
       return;
@@ -676,12 +1631,30 @@ inline void pixelviewBiomeGrade(Biome bi, int& r, int& g, int& b) {
 
 // Bare ground differs as much as the planting does: pale tan under a meadow,
 // black peat in a bog, grey scree on a mountain.
-inline void pixelviewBiomeSoil(Biome bi, int j, int& r, int& g, int& b) {
+// Takes x/y as well as the jitter, because the dark wants SHAPE — see the
+// tropical case.
+inline void pixelviewBiomeSoil(Biome bi, int j, int x, int y, uint32_t seed,
+                               int& r, int& g, int& b) {
   switch (bi) {
-    case MEADOW:   r = 68 + j / 2; g = 64 + j / 2; b = 42; break;  // dry olive
+    case MEADOW:   r = 84 + j / 2; g = 80 + j / 2; b = 52; break;  // dry olive
     case WETLAND:  r = 48 + j / 2; g = 46 + j / 2; b = 38; break;  // peat
     case ALPINE:   r = 92 + j / 2; g = 96 + j / 2; b = 104; break; // scree
-    case TROPICAL: r = 52 + j / 2; g = 40 + j / 2; b = 30; break;  // dark loam
+    case TROPICAL: {
+      // Bare ground is the second most common thing in a tropical frame
+      // (670 cells in 12100), and it was ALL near-black loam at luminance
+      // 45 with reef water at 130 beside it — which is why the world looked
+      // like it had holes punched in it. The dark is worth keeping; what it
+      // needed was shape. So the floor runs from sunlit leaf litter to deep
+      // shade across a smooth field: the gloom now POOLS under the canopy in
+      // patches you can read as depth, instead of being the flat default
+      // everywhere the planting happens to thin out.
+      float shade = pixelviewFbm2(x, y, 9.0f, seed ^ 0x50113u);
+      shade = std::clamp((shade - 0.34f) * 2.1f, 0.f, 1.f);
+      r = (int)(38.f + 44.f * shade) + j / 2;
+      g = (int)(32.f + 40.f * shade) + j / 2;
+      b = (int)(26.f + 22.f * shade);
+      break;
+    }
     case DESERT:   r = 178 + j / 2; g = 148 + j / 2; b = 104; break;
     default:       r = 26 + j / 2; g = 22 + j / 2; b = 18; break;
   }
@@ -703,19 +1676,83 @@ inline void pixelviewBiomeWater(Biome bi, int depth, float& fr, float& fg,
       fr *= 0.92f; fg *= 1.14f; fb *= 1.10f;
       fr += 18.f; fg += 26.f; fb += 14.f;
       break;
-    case TROPICAL:    // reef turquoise
-      fr *= 0.80f; fg *= 1.20f; fb *= 1.06f;
-      fg += 14.f;
+    case TROPICAL:    // reef turquoise — bright, but it is still water
+      fr *= 0.86f; fg *= 1.12f; fb *= 1.04f;
+      fg += 8.f;
       break;
     case DESERT:      // an oasis is jade, not ocean
-      fr *= 0.90f; fg *= 1.16f; fb *= 0.86f;
-      fg += 10.f;
+      // Deeper and greener than it was. A light cyan pool against a field of
+      // yellow sand is a straight complementary clash at full chroma, which
+      // is about the most abrasive thing two colours can do to each other.
+      fr *= 0.82f; fg *= 1.06f; fb *= 0.92f;
+      fg += 5.f;
       break;
     case MEADOW:      // a clear pond takes the sky
       fg += 6.f; fb += 10.f;
       break;
     default:
       break;
+  }
+}
+
+// ---------------------------------------------------------------------
+// Palette harmony
+// ---------------------------------------------------------------------
+// Every colour in this file was authored on its own — a green for grass, a
+// blue for water, a red for a fly agaric — and independently chosen colours
+// do not add up to a scene. They compete. Three things make them belong to
+// one world, applied last so nothing has to know about them:
+//
+//   CHROMA CEILING. A soft knee that only bites on the loudest cells, so a
+//   poppy stays a poppy while the mid-greens stop shouting. A flat
+//   saturation multiply pulls the quiet 80% of the frame down with the loud
+//   20% and reads as a faded photograph; this leaves it alone.
+//
+//   SPLIT TONE. Shadows cool, highlights warm. The oldest trick there is for
+//   making separately-painted things share a light, and the reason a graded
+//   frame reads as air rather than as a chart.
+//
+//   BLACK LIFT. Nothing in a lit scene is 0,0,0, and saturated colour hard
+//   against true black is exactly what makes an edge buzz. Skipped in OLED
+//   ground mode, where true black is the entire point of the setting.
+//
+// `ceilAmt` scales the chroma ceiling alone. WATER passes 0 for it, and that
+// is not a special case so much as the whole rule stated once: the ceiling
+// exists to tame colours that were each chosen on their own and never
+// checked against each other. The water ramp is the opposite of that — it
+// was built as one deliberate navy→turquoise scale and tuned against real
+// water. Running a ceiling over it desaturated the shallows into flat grey
+// sheets in the rivers, which is exactly the disease, not the cure.
+inline void pixelviewHarmonise(float& rr, float& gg, float& bb, float amt,
+                               float ceilAmt = 1.0f) {
+  if (amt <= 0.002f) return;
+  float lum = 0.299f * rr + 0.587f * gg + 0.114f * bb;
+
+  float mx = std::max(rr, std::max(gg, bb));
+  float mn = std::min(rr, std::min(gg, bb));
+  float chroma = mx - mn;
+  const float kKnee = 82.f;    // below this a colour is already calm
+  if (chroma > kKnee && ceilAmt > 0.002f) {
+    // Compress the excess toward a ceiling rather than clipping it, so the
+    // ordering of two loud colours survives even as the gap closes.
+    float over = chroma - kKnee;
+    float want = kKnee + over / (1.f + over / 105.f);
+    float k = 1.f - (1.f - want / chroma) * amt * ceilAmt;
+    rr = lum + (rr - lum) * k;
+    gg = lum + (gg - lum) * k;
+    bb = lum + (bb - lum) * k;
+  }
+
+  float t = std::clamp(lum * (1.f / 255.f), 0.f, 1.f);
+  float shadow = (1.f - t) * (1.f - t);
+  float high = t * t;
+  rr += (-2.5f * shadow + 6.0f * high) * amt;
+  gg += (-0.5f * shadow + 3.5f * high) * amt;
+  bb += ( 8.0f * shadow - 5.0f * high) * amt;
+
+  if (displayBgMode() != 1) {
+    float lift = shadow * 7.0f * amt;
+    rr += lift * 0.85f; gg += lift * 0.90f; bb += lift;
   }
 }
 
@@ -814,9 +1851,32 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
       int gx = 0, gy = 0;
       if (x > 0 && x < W - 1) gx = (int)w.height[y][x-1] - (int)w.height[y][x+1];
       if (y > 0 && y < H - 1) gy = (int)w.height[y-1][x] - (int)w.height[y+1][x];
+
+      // How enclosed is this water? Counted once, up here, because it
+      // decides BOTH whether this is open water at all and, if it is, how
+      // hard it shoals. 24 neighbours: near 0 is open sea, near 24 is a
+      // ditch.
+      int landNear = 0;
+      for (int oy = -2; oy <= 2; ++oy)
+        for (int ox = -2; ox <= 2; ++ox) {
+          if (ox == 0 && oy == 0) continue;
+          int nx2 = x + ox, ny2 = y + oy;
+          if (nx2 < 0 || ny2 < 0 || nx2 >= W || ny2 >= H) continue;
+          if (w.water[ny2][nx2] == 0) ++landNear;
+        }
+
+      // A WATERCOURSE IS NOT A COASTLINE. Surf needs a fetch to build over;
+      // a channel a few cells wide has none, and it was getting the full
+      // breaking-wave treatment because `shore` counted the land hemming it
+      // in and read that as "shallowing beach". With more than about
+      // two-thirds land around it the shoal term pinned high, which made
+      // `breaking` (shoal > 0.55) permanently true — so entire rivers
+      // rendered as standing whitewater: the flat grey sheets. Narrow water
+      // takes the flowing-ripple path instead, whatever the gradient says.
+      bool channel = landNear >= 16;
       // >=2 catches the gentle ~0.7/cell ramps of carved through-rivers,
       // not just steep mountain streams.
-      bool river = (std::abs(gx) + std::abs(gy) >= 2) && d <= 3;
+      bool river = ((std::abs(gx) + std::abs(gy) >= 2) && d <= 3) || channel;
       bool stillBiome = (w.biome == WETLAND || w.biome == DESERT);
 
       if (river) {
@@ -839,14 +1899,11 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
 
         // How much this cell feels the bottom: 0 in the deep, 1 in the surf.
         float shoal = std::clamp((5.f - (float)d) / 4.f, 0.f, 1.f);
-        int landNear = 0;
-        for (int oy = -2; oy <= 2; ++oy)
-          for (int ox = -2; ox <= 2; ++ox) {
-            int nx2 = x + ox, ny2 = y + oy;
-            if (nx2 < 0 || ny2 < 0 || nx2 >= W || ny2 >= H) continue;
-            if (w.water[ny2][nx2] == 0) ++landNear;
-          }
-        float shore = std::clamp((float)landNear / 6.f, 0.f, 1.f);
+        // /6 meant a quarter of the neighbourhood being land pinned this to
+        // full shore, so surf started forming a long way out. A real break
+        // wants to be close in: ramp it over the range an actual beach cell
+        // occupies (roughly 2 to 13 of 24).
+        float shore = std::clamp(((float)landNear - 2.f) / 11.f, 0.f, 1.f);
         shoal = std::max(shoal, shore * 0.9f);
 
         // Steepening: amplitude grows and the face sharpens as it shallows.
@@ -860,14 +1917,13 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
             { 16,  62, 122}, { 20,  78, 140}, { 25,  95, 158}, { 31, 113, 175},
             { 38, 133, 190}, { 47, 152, 202}, { 58, 172, 213}, { 74, 194, 222},
         };
-        // Offshore the swell is very nearly INVISIBLE as colour. Big coherent
-        // bands rolling across open water are the single most immersion-
-        // breaking thing this renderer did: from above, deep ocean is texture
-        // and glitter, and the only place a wave becomes a shape you can see
-        // is where it feels the bottom. So the swell still drives everything —
-        // where the sets are, when things break — but offshore it barely
-        // touches the body colour at all.
-        float gain = 0.10f + 1.05f * shoal;
+        // How much the swell shows offshore is a matter of taste: full bands
+        // rolling across open water break the illusion, but none at all is
+        // dead flat. So it is a live knob (~/.terrarium-swell, `vat swell`),
+        // judged on the panel. Inshore the gain always climbs regardless —
+        // the breaking surf is not up for negotiation.
+        float offshore = 0.06f + 0.80f * displaySwell();
+        float gain = offshore + (1.15f - offshore) * shoal;
         float t01 = std::clamp(surf * gain + 0.5f, 0.f, 1.f);
         int lvl = std::clamp((int)(t01 * 11.999f), 0, 11);
         float pale = shoal * 26.f;
@@ -885,7 +1941,7 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
         // scatters off the wave faces, not from bands of colour. Density
         // follows the slope, so the sets are still legible as movement.
         if (shoal < 0.45f) {
-          float slope = std::fabs(swell);
+          float slope = std::fabs(swell) * (1.25f - 0.5f * displaySwell());
           uint32_t gh = hash3((uint32_t)x, (uint32_t)(y + (int)(animT * 4.f)),
                               w.worldSeed ^ 0x611778u);
           uint32_t density = (uint32_t)(90.f - 62.f * slope);
@@ -1094,7 +2150,7 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
       case 'c': r = 90; g = 170 + j; b = 100; break;
       default:
         if (displayBgMode() == 1) { r = g = b = 0; }             // oled: true black
-        else pixelviewBiomeSoil(w.biome, j, r, g, b);            // earth
+        else pixelviewBiomeSoil(w.biome, j, x, y, w.worldSeed, r, g, b);
         break;
     }
     if (t == KELP_GLYPH) { r = 24; g = 140 + j; b = 110; }
@@ -1104,7 +2160,20 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
     // every desert bloom orange.
     bool accent = (t == 'f' || t == '+' || t == '&' || t == '!' || t == 'm' ||
                    t == '$' || t == '*' || t == 'V' || t == 'C');
-    if (!accent && w.biome != CITY) pixelviewBiomeGrade(w.biome, r, g, b);
+    if (!accent && w.biome != CITY) {
+      pixelviewBiomeGrade(w.biome, r, g, b);
+    } else if (accent && w.biome != CITY) {
+      // Accents keep their chosen hue — grading them turned white petals
+      // yellow and every desert bloom orange, and that rule stands. But an
+      // ungraded full-chroma cell sitting alone on a field of sand does not
+      // read as a flower at 1px/cell, it reads as a stuck pixel. So the
+      // BLOOM stays its own colour and only its LIGHT is shared: grade a
+      // copy, then take a fifth of the way there. Enough to belong to the
+      // world, far too little to shift the hue.
+      int gr = r, gg2 = g, gb = b;
+      pixelviewBiomeGrade(w.biome, gr, gg2, gb);
+      r += (gr - r) / 5; g += (gg2 - g) / 5; b += (gb - b) / 5;
+    }
   }
 
   // The alien world is not Earth with odd colours: its whole biology is
@@ -1210,6 +2279,7 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
   if (tintable && w.biome != TROPICAL && w.biome != ALIEN && w.biome != CITY) {
     bool woody = (t == 'T' || t == 'Y' || t == 'P');
     bool leafy = woody || t == '#';
+    bool grassy = (t == ',' || t == '"' || t == ';' || t == ':');
     if (leafy) {
       float sl = seasonLerp(tick);
       uint32_t th = hash3((uint32_t)(x / 2), (uint32_t)(y / 2),
@@ -1254,14 +2324,46 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
       } else if (season == SUMMER) {
         g = (int)(g * 0.94f); r = (int)(r * 1.05f);   // deep, slightly dusty
       }
+    } else if (grassy) {
+      // Grass turns too — and in a meadow it is the only thing that turns at
+      // any scale, because the trees are far too sparse to carry a season on
+      // their own. That is why softening the terrain grade made summer and
+      // autumn look identical out here. It goes TAWNY, not gold: a hayfield
+      // in October is straw, not a maple.
+      float sl = seasonLerp(tick);
+      uint32_t gh2 = hash3((uint32_t)(x / 3), (uint32_t)(y / 3),
+                           w.worldSeed ^ 0x62A55u);
+      float own = (float)(gh2 & 255u) / 255.f;
+      if (season == AUTUMN) {
+        float turn = std::clamp(sl * 1.3f - own * 0.35f, 0.f, 1.f) * 0.70f;
+        int tr = 172 + (int)(26.f * own), tg = 148 + (int)(20.f * own), tb = 84;
+        r = (int)(r + (tr - r) * turn);
+        g = (int)(g + (tg - g) * turn);
+        b = (int)(b + (tb - b) * turn);
+      } else if (season == WINTER) {
+        // Dead straw under the snow, where the snow has not covered it.
+        float dead = std::clamp(0.45f + 0.40f * sl, 0.f, 1.f) * 0.78f;
+        int tr = 134 + (int)(20.f * own), tg = 120 + (int)(16.f * own), tb = 88;
+        r = (int)(r + (tr - r) * dead);
+        g = (int)(g + (tg - g) * dead);
+        b = (int)(b + (tb - b) * dead);
+      } else if (season == SPRING) {
+        float fresh = std::clamp(1.f - sl * 0.6f, 0.f, 1.f);
+        g = (int)(g + (190 - g) * 0.22f * fresh);
+        b = (int)(b + (110 - b) * 0.10f * fresh);
+      }
     }
   }
 
   // Season grade on terrain: autumn browns the foliage, spring vivifies,
   // winter cools — plus a frost/snow dusting on open ground in winter.
   if (tintable) {
-    if (season == AUTUMN) { r += 14; g -= 6; }
-    else if (season == SPRING) { g += 8; }
+    // A WARM LIGHT over the ground, not a coat of brown paint. At +14 red /
+    // -6 green this stacked on top of the canopy turn above and took the
+    // whole world to chocolate — and on ALPINE's blue-grey scree the two
+    // together came out lilac.
+    if (season == AUTUMN) { r += 6; g += 1; b -= 4; }
+    else if (season == SPRING) { g += 7; b += 2; }
     else if (snowy) {
       r = (int)(r * 0.90f) + 14; g = (int)(g * 0.92f) + 12; b += 22;
       // Snow settles on open ground and grass; trees and shrubs just take
@@ -1270,9 +2372,25 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
                      t == ':' || t == 's' ||
                      isCityPaved(t) || t == CITY_LOT);  // snow lies on streets
       if (ground) {
-        uint32_t sh = hash3((uint32_t)x, (uint32_t)y, 0x534E4F57u);
-        float cover = 0.10f + 0.22f * seasonLerp(tick);
-        if ((float)(sh & 1023u) / 1023.0f < cover) { r = 226; g = 232; b = 244; }
+        // Snow DRIFTS. A per-cell coin flip against a coverage fraction is
+        // white noise, and white noise at 1px/cell is indistinguishable from
+        // a failing panel — this was far and away the loudest thing in a
+        // winter frame. A smooth depth field instead: it banks against the
+        // low-frequency pattern, and the edges of the banks come out
+        // dithered for free because the blend is continuous.
+        float depth = pixelviewFbm2(x, y, 7.0f, w.worldSeed ^ 0x534E4F57u);
+        float level = 0.26f + 0.44f * seasonLerp(tick);
+        float lay = std::clamp((depth - (1.f - level)) * 3.2f, 0.f, 1.f);
+        if (lay > 0.f) {
+          // Snow in shade is BLUE. Flat 226,232,244 is why it read as paper
+          // cut-outs instead of as something lying on a surface with shape.
+          float sh2 = 0.82f + 0.18f * pixelviewValueNoise(x, y, 3.0f, 0x5D0Cu);
+          int sr = (int)(204.f * sh2) + 14, sg = (int)(214.f * sh2) + 16,
+              sb = (int)(230.f * sh2) + 18;
+          r = (int)(r + (sr - r) * lay);
+          g = (int)(g + (sg - g) * lay);
+          b = (int)(b + (sb - b) * lay);
+        }
       }
       // Roofs take snow too, but blended: a hard white speckle over the
       // city's painted metal read as static rather than settled snow.
@@ -1321,14 +2439,30 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
   if (d > 0 && snowy && w.biome != TROPICAL) {
     float sl = seasonLerp(tick);
     float depthFactor = (d <= 2) ? 1.0f : (d <= 4 ? 0.45f : 0.10f);
-    uint32_t ih = hash3((uint32_t)x, (uint32_t)y, w.worldSeed ^ 0x1CE1u);
-    float rough = 0.75f + 0.25f * (float)(ih & 255u) / 255.f;
+    // Coherent roughness, for the same reason the snow drifts: a per-cell
+    // random made the ice surface white noise, and a crack chosen by
+    // `hash % 41` put an isolated pure-white pixel on one frozen cell in
+    // forty-one. Ice does not craze one pixel at a time.
+    float rough = 0.78f + 0.22f * pixelviewFbm2(x, y, 6.0f,
+                                                w.worldSeed ^ 0x1CE1u);
     float ice = std::clamp(sl * 1.25f, 0.f, 1.f) * depthFactor * rough;
     if (ice > 0.02f) {
       r = (int)(r + (198 - r) * ice);
       g = (int)(g + (220 - g) * ice);
       b = (int)(b + (236 - b) * ice);
-      if (ice > 0.55f && (ih % 41u) == 0u) { r = 236; g = 246; b = 252; }  // a crack
+      // Cracks are LINES. Taking the contour where a smooth field crosses a
+      // level gives connected veins that wander and branch, which is what a
+      // frozen pond actually looks like, for the same cost as the dots.
+      if (ice > 0.55f) {
+        float cf = pixelviewValueNoise(x, y, 11.0f, w.worldSeed ^ 0xC2ACu);
+        float vein = std::fabs(cf - 0.5f);
+        if (vein < 0.028f) {
+          float k = (1.f - vein / 0.028f) * 0.85f;
+          r = (int)(r + (236 - r) * k);
+          g = (int)(g + (246 - g) * k);
+          b = (int)(b + (252 - b) * k);
+        }
+      }
     }
   }
 
@@ -1340,6 +2474,30 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
   float rr = (float)r * bright * (1.f + 0.20f * dl.warm);
   float gg = (float)g * bright * (1.f + 0.04f * (dl.warm > 0.f ? dl.warm : 0.f));
   float bb = (float)b * bright * (1.f - 0.18f * dl.warm);
+
+  // The sky replaces all of the above. It takes the daylight directly
+  // rather than through the cloud-shadow/brightness chain, because up here
+  // the clouds are the subject rather than something casting on the ground,
+  // and a cloud shadow falling on the sky itself is a contradiction.
+  if (w.biome == SKY) {
+    pixelviewSkyCell(w, x, y, animT, dl, rr, gg, bb);
+    // Only the split tone and black lift, never the chroma ceiling: the
+    // balloons and the mane are the point.
+    pixelviewHarmonise(rr, gg, bb, displayHarmony(), 0.0f);
+    float lift = displayLift();
+    if (lift > 1.001f) {
+      rr = 255.f * (1.f - std::pow(1.f - std::clamp(rr / 255.f, 0.f, 1.f), lift));
+      gg = 255.f * (1.f - std::pow(1.f - std::clamp(gg / 255.f, 0.f, 1.f), lift));
+      bb = 255.f * (1.f - std::pow(1.f - std::clamp(bb / 255.f, 0.f, 1.f), lift));
+    }
+    float ck2 = displayContrast();
+    if (ck2 != 1.0f) {
+      rr = (rr - 128.f) * ck2 + 128.f;
+      gg = (gg - 128.f) * ck2 + 128.f;
+      bb = (bb - 128.f) * ck2 + 128.f;
+    }
+    return PixelviewRGB{clampU8((int)rr), clampU8((int)gg), clampU8((int)bb)};
+  }
 
   // Things in the air: leaves off the turning wood in autumn, blossom in
   // spring. They blow with the wind, which also makes the wind visible.
@@ -2065,6 +3223,16 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
   if (w.weather.state == STORM && (hash3((uint32_t)tick, 99u, 7u) % 19u) == 0u) {
     rr = rr * 1.5f + 70.f; gg = gg * 1.5f + 70.f; bb = bb * 1.4f + 60.f;
   }
+
+  // Palette harmony: chroma ceiling, split tone, black lift. Last thing
+  // before the user's own brightness/contrast controls, so every colour in
+  // the frame — terrain, water, weather, cast — passes through one light.
+  // ALIEN takes only a third of it: its whole identity is that it emits, and
+  // a chroma ceiling is precisely the wrong instrument to point at that.
+  // Water keeps its own saturation (ceilAmt 0) — see pixelviewHarmonise.
+  pixelviewHarmonise(rr, gg, bb,
+                     displayHarmony() * (w.biome == ALIEN ? 0.33f : 1.0f),
+                     d > 0 ? 0.0f : 1.0f);
 
   // Brightness lift (live). A 256-entry table, rebuilt only when the setting
   // moves, keeps this off the per-cell pow() path — it runs on a Pi Zero.

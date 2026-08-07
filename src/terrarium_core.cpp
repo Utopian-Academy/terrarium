@@ -202,6 +202,70 @@ float displayContrast() {
   return cached;
 }
 
+float displaySwell() {
+  static float cached = 0.30f;
+  static std::chrono::steady_clock::time_point lastRead{};
+  auto now = std::chrono::steady_clock::now();
+  if (now - lastRead < std::chrono::seconds(1)) return cached;
+  lastRead = now;
+  const char* home = std::getenv("HOME");
+  if (!home) return cached;
+  std::string path = std::string(home) + "/.terrarium-swell";
+  cached = 0.30f;
+  if (FILE* f = std::fopen(path.c_str(), "r")) {
+    float v = 0.30f;
+    if (std::fscanf(f, "%f", &v) == 1) cached = std::clamp(v, 0.f, 1.f);
+    std::fclose(f);
+  }
+  return cached;
+}
+
+bool skyFlyerUp(const SkyFlyer& f, float seconds, float* age, uint32_t* h) {
+  uint32_t ep = (uint32_t)(seconds / f.period);
+  uint32_t hh = hash3(ep, f.s1, f.s2);
+  float a = seconds - (float)ep * f.period;
+  if (age) *age = a;
+  if (h) *h = hh;
+  return ((hh % f.modv) == f.modr) && a < f.dwell;
+}
+
+float skyTraffic01(float seconds) {
+  // Weighted by rarity: a balloon is scenery, a dragon is an event. Each
+  // contribution is shaped by a sine over its crossing so a source ramps in
+  // and out with the thing itself rather than stepping on and off.
+  struct Entry { const SkyFlyer* f; float weight; };
+  static const Entry kAll[] = {
+      {&SKY_DRAGON, 1.00f}, {&SKY_UNICORN, 0.85f}, {&SKY_UFO, 0.80f},
+      {&SKY_RIDER, 0.55f},  {&SKY_WITCH, 0.65f},
+  };
+  float sum = 0.f;
+  for (const Entry& e : kAll) {
+    float age = 0.f;
+    if (!skyFlyerUp(*e.f, seconds, &age, nullptr)) continue;
+    float p = std::clamp(age / e.f->dwell, 0.f, 1.f);
+    sum += e.weight * std::sin(3.14159f * p);
+  }
+  return clamp01(sum);
+}
+
+float displayHarmony() {
+  static float cached = 1.00f;
+  static std::chrono::steady_clock::time_point lastRead{};
+  auto now = std::chrono::steady_clock::now();
+  if (now - lastRead < std::chrono::seconds(1)) return cached;
+  lastRead = now;
+  const char* home = std::getenv("HOME");
+  if (!home) return cached;
+  std::string path = std::string(home) + "/.terrarium-harmony";
+  cached = 1.00f;
+  if (FILE* f = std::fopen(path.c_str(), "r")) {
+    float v = 1.00f;
+    if (std::fscanf(f, "%f", &v) == 1) cached = std::clamp(v, 0.f, 1.f);
+    std::fclose(f);
+  }
+  return cached;
+}
+
 float terraSeconds() {
   static auto t0 = std::chrono::steady_clock::now();
   return std::chrono::duration<float>(std::chrono::steady_clock::now() - t0)
@@ -415,6 +479,7 @@ const char* biomeName(Biome b) {
     case DESERT: return "desert";
     case CITY:   return "city";
     case OCEAN:  return "ocean";
+    case SKY:    return "sky";
   }
   return "meadow";
 }
@@ -456,6 +521,8 @@ BiomeWeights weightsFor(Biome b) {
       return {0.30f, 0.30f, 0.25f, 0.35f, 0.45f, 0.30f, 0.55f, 0.25f, 0.60f, 0.70f, 0.30f, 0.35f};
     case OCEAN:  // only the atolls have anything growing on them
       return {0.10f, 0.90f, 0.30f, 0.30f, 0.55f, 0.40f, 0.45f, 0.20f, 0.70f, 0.90f, 0.10f, 0.45f};
+    case SKY:  // nothing grows in mid-air; the renderer paints all of it
+      return {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
   }
   return weightsFor(MEADOW);
 }
@@ -727,6 +794,19 @@ for(int i=0;i<15;++i) g_modVal[35+i]=clamp01f(odd[i]);
   // 67 biolum       alien emissive flora, weighted by how dark it has got
   g_modVal[67] = clamp01f((float)emissive / area * 18.f) *
                  clamp01f(0.25f + 0.75f * (1.f - dl.level));
+  // 68 sky_traffic  what is crossing the sky right now (SKY only). Read off
+  //                 the shared clock rather than the renderer, so it is just
+  //                 as true with no editor open — see skyTraffic01.
+  g_modVal[68] = (w.biome == SKY) ? clamp01f(skyTraffic01(terraSeconds())) : 0.f;
+  // 69 sky_wonder   how OPEN the sky is: clear air and steady wind. The
+  //                 counterpart to traffic — the empty sky is a mood too,
+  //                 and something has to modulate during the long quiet.
+  g_modVal[69] = (w.biome == SKY)
+                     ? clamp01f((1.f - w.weather.rainStrength) *
+                                (0.35f + 0.65f * dl.level) *
+                                (0.55f + 0.45f * clamp01f(
+                                     (float)w.wind.strength / 3.f)))
+                     : 0.f;
 }
 
 for(int i=0;i<MOD_N;++i){
@@ -754,6 +834,7 @@ static inline uint32_t biomeSalt(Biome b) {
     case ALIEN:    return 0xA11E1u;
     case CITY:     return 0xC17F0u;
     case OCEAN:    return 0x0CEA1u;
+    case SKY:      return 0x5C1E5u;
     default:       return 0xBEEFu;
   }
 }
@@ -1503,6 +1584,19 @@ w.biome = biome;
       if (w.water[y][x] >= 1 && w.water[y][x] <= 3 && r.oneIn(2))
         w.terrain[y][x] = KELP_GLYPH;
     }
+  } else if (biome == SKY) {
+    // Nothing to seed. There is no ground up here: no terrain, no water, no
+    // planting. `height` is the only field that carries anything, and what
+    // it carries is not altitude but CLOUD BODY — the renderer reads it as
+    // how much vapour is stacked over that cell, which is why the noise
+    // field genHeight already produced is exactly the right shape to keep.
+    // Everything else you see is drawn: the gradient, the layers, and the
+    // traffic crossing them.
+    for (int y=0;y<H;++y) for (int x=0;x<W;++x) {
+      w.terrain[y][x] = '.';
+      w.water[y][x] = 0;
+      w.moist[y][x] = 0;
+    }
   } else if (biome == CITY) {
     seedCity(w, r);
   } else if (biome == TROPICAL) {
@@ -1523,6 +1617,7 @@ w.biome = biome;
   int ponds = std::max(2, (int)(basePonds * w.bw.pondDensity));
   if (biome == CITY) ponds = 0;   // the harbour is the water here
   if (biome == OCEAN) ponds = 0;  // it is already all water
+  if (biome == SKY) ponds = 0;    // ponds do not hang in mid-air
   for (int p=0; p<ponds; ++p) {
     int marginX = std::max(12, W/18);
     int marginY = std::max(8,  H/18);
@@ -1746,6 +1841,7 @@ for (int y=0;y<H;++y) for (int x=0;x<W;++x) {
     if (biome==TROPICAL) springCount = 2;
     if (biome==ALIEN)   springCount = 2;
     if (biome==OCEAN) springCount = 0;
+    if (biome==SKY)   springCount = 0;
     if (biome==CITY) {
       // The tide keeps the harbour full; a spring hunting for a low basin
       // would sink a pond into the middle of downtown instead.
@@ -1890,6 +1986,7 @@ static float biomeWetTarget(Biome b) {
     case ALPINE:   return 0.18f;
     case CITY:     return 0.26f;  // the harbour, and it stays a harbour
     case OCEAN:    return 0.93f;  // it is the sea
+    case SKY:      return 0.00f;  // there is no ground to be wet
     default:       return 0.22f;  // meadow
   }
 }

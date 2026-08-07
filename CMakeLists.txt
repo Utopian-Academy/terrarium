@@ -86,6 +86,30 @@ target_compile_options(terrarium-pico PRIVATE
   $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic>
 )
 
+# Headless contact sheet: renders the pixelview palette to a BMP with no
+# window and no panel. Colour work cannot be judged by reading arithmetic.
+add_executable(terrarium-contact
+  tools/terrarium_contact.cpp
+  src/terrarium_core.cpp
+)
+set(TERRA_CONTACT_SIZE 200 CACHE STRING "contact-sheet world size in cells")
+target_compile_definitions(terrarium-contact PRIVATE
+  TERRA_W=${TERRA_CONTACT_SIZE} TERRA_H=${TERRA_CONTACT_SIZE} SDL_MAIN_HANDLED)
+target_include_directories(terrarium-contact PRIVATE src)
+target_compile_options(terrarium-contact PRIVATE
+  $<$<CXX_COMPILER_ID:MSVC>:/W4 /permissive->
+  $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic>
+)
+
+# Mod-matrix / musical-identity check, headless.
+add_executable(terrarium-modcheck
+  tools/terrarium_modcheck.cpp
+  src/terrarium_core.cpp
+)
+target_compile_definitions(terrarium-modcheck PRIVATE
+  TERRA_W=${TERRA_CONTACT_SIZE} TERRA_H=${TERRA_CONTACT_SIZE} SDL_MAIN_HANDLED)
+target_include_directories(terrarium-modcheck PRIVATE src)
+
 if(TERRARIUM_USE_FLUIDSYNTH)
   pkg_check_modules(FLUIDSYNTH REQUIRED fluidsynth)
   target_compile_definitions(terrarium PRIVATE USE_FLUIDSYNTH)

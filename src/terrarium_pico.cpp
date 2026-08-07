@@ -37,7 +37,11 @@ namespace {
 struct PicoOptions {
   Biome biome = MEADOW;
   int scale = 3;      // window = (W*scale) x (H*scale); use 1 on the Pi
-  int tps = DEFAULT_TPS;
+  // 60, not the shared DEFAULT_TPS of 6. That 6 is a GLYPH-app pace: there
+  // you are reading a grid of characters and want to watch each change land.
+  // At 1px/cell the sim is a moving image, and 6 ticks/s reads as a slideshow
+  // — water steps, agents teleport. The glyph app keeps 6.
+  int tps = 60;
   bool fullscreen = false;
   bool circle = false;  // mask to the inscribed circle (round LED panels)
   bool island = false;  // radial island worldgen with an ocean ring
@@ -58,18 +62,32 @@ PicoOptions parseArgs(int argc, char** argv) {
     std::string a = argv[i];
     auto next = [&]() -> const char* { return (i + 1 < argc) ? argv[++i] : ""; };
     if (a == "--biome") {
+      // Matched against biomeName() rather than a hand-written chain. The
+      // chain silently fell through to MEADOW for anything it did not list,
+      // so adding SKY to the enum produced a kiosk that accepted
+      // `--biome sky` without complaint and then rendered a meadow — with
+      // rivers and flowers in it. An unknown name is now an ERROR, because
+      // a typo you cannot see on a wall-mounted panel is worse than a exit.
       std::string b = next();
-      if (b == "wetland") o.biome = WETLAND;
-      else if (b == "alpine") o.biome = ALPINE;
-      else if (b == "alien") o.biome = ALIEN;
-      else if (b == "tropical") o.biome = TROPICAL;
-      else if (b == "desert") o.biome = DESERT;
-      else if (b == "city") o.biome = CITY;
-      else if (b == "ocean") o.biome = OCEAN;
+      bool found = false;
+      for (int i = 0; i < BIOME_COUNT; ++i) {
+        if (b == biomeName((Biome)i)) { o.biome = (Biome)i; found = true; break; }
+      }
+      if (!found) {
+        std::fprintf(stderr, "unknown biome '%s'. known:", b.c_str());
+        for (int i = 0; i < BIOME_COUNT; ++i)
+          std::fprintf(stderr, " %s", biomeName((Biome)i));
+        std::fprintf(stderr, "\n");
+        std::exit(2);
+      }
     } else if (a == "--scale") {
       o.scale = std::clamp(std::atoi(next()), 1, 8);
     } else if (a == "--tps") {
-      o.tps = std::clamp(std::atoi(next()), 1, 60);
+      // Headroom well past 60. Whether the machine can actually SUSTAIN it is
+      // a separate question — the loop only steps when the interval has
+      // elapsed, so asking for more than the hardware can do costs nothing
+      // and simply runs at whatever it manages.
+      o.tps = std::clamp(std::atoi(next()), 1, 240);
     } else if (a == "--seed") {
       o.seed = (uint32_t)std::strtoul(next(), nullptr, 0);
     } else if (a == "--fullscreen") {
@@ -278,7 +296,7 @@ int main(int argc, char** argv) {
         case SDLK_SPACE: paused = !paused; break;
         case SDLK_PERIOD: if (paused) doTick(); break;
         case SDLK_LEFTBRACKET: if (tps > 1) --tps; break;
-        case SDLK_RIGHTBRACKET: if (tps < 60) ++tps; break;
+        case SDLK_RIGHTBRACKET: if (tps < 240) ++tps; break;
         case SDLK_r:
           rng = Rng(++seed);
           seedWorld(world, rng, world.biome);
@@ -317,6 +335,7 @@ int main(int argc, char** argv) {
           {ALIEN, false},   {TROPICAL, false}, {DESERT, false},
           {CITY, false},     // a harbour city
           {OCEAN, false},    // the open sea
+          {SKY, false},      // and up, into the weather
           {TROPICAL, true},  // a new island
       };
       constexpr int kStops = (int)(sizeof(stops) / sizeof(stops[0]));
@@ -372,8 +391,8 @@ int main(int argc, char** argv) {
         // fractional zoom inherently soft), cinematic only while traveling —
         // a gentle push-in swells and settles across the voyage crossing.
         float kbZ = 1.f, kbCx = (float)W * 0.5f, kbCy = (float)H * 0.5f;
-        // Voyage pan offset (float: sub-pixel smooth).
-        float panOffF = 0.f;
+        // Voyage crossing progress, 0..1 (see the dissolve below).
+        float panT = 0.f;
         if (panning) {
           float p = (animT - panStart) / kPanSec;
           if (p >= 1.f) {
@@ -382,8 +401,7 @@ int main(int argc, char** argv) {
             panning = false;
             lastDriftMs = SDL_GetTicks();
           } else {
-            float e = p * p * (3.f - 2.f * p);  // ease the crossing
-            panOffF = e * (float)W;
+            panT = p * p * (3.f - 2.f * p);  // ease the crossing
             // Push-in that peaks mid-crossing and settles on arrival.
             kbZ = 1.f + 0.10f * std::sin(p * 3.14159f);
           }
@@ -439,12 +457,41 @@ int main(int argc, char** argv) {
             if (!warp) {
               px = baseA[(size_t)y * W + x];
             } else {
-              float sxf = (float)x + panOffF;
-              const std::vector<uint32_t>& buf = (sxf < (float)W) ? baseA : baseB;
-              if (sxf >= (float)W) sxf -= (float)W;
-              float wxf = kbCx + (sxf - (float)W * 0.5f) / kbZ;
+              float wxf = kbCx + ((float)x - (float)W * 0.5f) / kbZ;
               float wyf = kbCy + ((float)y - (float)H * 0.5f) / kbZ;
-              px = sampleBi(buf, wxf, wyf);
+              if (!panning) {
+                px = sampleBi(baseA, wxf, wyf);
+              } else {
+                // A DISSOLVE, not a wipe. The old crossing slid world B in
+                // from the right, which put a hard vertical seam down the
+                // middle of the disc — the one straight line in a world that
+                // has none, travelling at constant speed. Instead both
+                // worlds are rendered in place and a soft threshold sweeps
+                // across a noise field: where the field is low the new world
+                // arrives first, so the boundary is a ragged front that
+                // fingers and pools like weather coming in. Each cell still
+                // crosses over exactly once, and no cell crosses twice.
+                uint32_t a2 = sampleBi(baseA, wxf, wyf);
+                uint32_t b3 = sampleBi(baseB, wxf, wyf);
+                // Two octaves so the front has both large lobes and a
+                // frayed edge, plus a gentle left-to-right bias so the
+                // change still reads as travelling rather than blinking.
+                float n = pixelviewFbm2(x, y, 26.f, 0x7A0E1u);
+                float bias = (float)x / (float)W;
+                float field = n * 0.72f + bias * 0.28f;
+                // The threshold oversteps 0..1 at both ends by the width of
+                // the blend band, so the crossing genuinely finishes.
+                const float kBand = 0.34f;
+                float thr = panT * (1.f + 2.f * kBand) - kBand;
+                float m = std::clamp((thr - field) / kBand + 0.5f, 0.f, 1.f);
+                m = m * m * (3.f - 2.f * m);            // ease the handover
+                auto mix = [&](int sh) {
+                  float av = (float)((a2 >> sh) & 0xFF);
+                  float bv = (float)((b3 >> sh) & 0xFF);
+                  return (uint32_t)(av + (bv - av) * m);
+                };
+                px = 0xFF000000u | (mix(16) << 16) | (mix(8) << 8) | mix(0);
+              }
             }
             if (opt.circle) {
               float dx = (float)x - cc;

@@ -216,10 +216,15 @@ inline int countNeighborsChar(const Grid& g, int x, int y, char c) {
 
 enum Season { SPRING=0, SUMMER=1, AUTUMN=2, WINTER=3 };
 
-inline constexpr int BIOME_COUNT = 8;
+inline constexpr int BIOME_COUNT = 9;
 
+// SKY is the odd one: every other biome looks DOWN at a world, and the sky
+// looks UP from underneath it. There is no ground, so the sim's fields are
+// repurposed rather than extended — `height` carries cloud body and `water`
+// stays empty — and the renderer supplies the whole picture. Appended last:
+// saved patches and the voyage stop table both address biomes by index.
 enum Biome { MEADOW=0, WETLAND=1, ALPINE=2, ALIEN=3, TROPICAL=4, DESERT=5,
-             CITY=6, OCEAN=7 };
+             CITY=6, OCEAN=7, SKY=8 };
 
 
 // ---- City terrain glyphs ----
@@ -390,7 +395,7 @@ inline int g_camY = 0;
 inline std::vector<Ripple> g_ripples;
 inline AleaWeights g_alea;
 
-static constexpr int MOD_N = 68;
+static constexpr int MOD_N = 70;
 inline const char* g_modName[MOD_N] = {
   "water_view", "plants_view", "overlay_view", "agents_view", "agent_speed",
   "stress_mean", "stress_hi", "panic_count", "hunger_mean", "thirst_mean",
@@ -409,7 +414,9 @@ inline const char* g_modName[MOD_N] = {
   // The city, the sea and the thing that watches. Appended, never inserted:
   // saved patches address slots by index.
   "city_built", "city_skyline", "city_neon", "city_streets", "city_rush",
-  "harbour_boats", "open_water", "reef", "apparition", "biolum"
+  "harbour_boats", "open_water", "reef", "apparition", "biolum",
+  // The sky. Appended, never inserted.
+  "sky_traffic", "sky_wonder"
 };
 inline float g_modVal[MOD_N] = {0};
 
@@ -530,10 +537,54 @@ inline constexpr float ALIEN_APPARITION_DWELL = 30.f;
 inline constexpr uint32_t ALIEN_APPARITION_ODDS = 11u;  // one epoch in eleven
 float alienApparition01(const World& w, float seconds);
 
+// ---- Sky traffic schedule ----
+// Lives in core for exactly the reason the apparition's does: in the plugin
+// the UI only runs while an editor is open, so anything derived from
+// renderer state reads zero whenever nobody is looking, and a modulation
+// source that depends on being watched is not a modulation source.
+//
+// This is the single source of truth for WHETHER a given flyer is currently
+// crossing. The renderer calls it too and then supplies only the geometry,
+// so the music and the picture can never disagree about what is up there.
+struct SkyFlyer {
+  float period;   // seconds between chances
+  float dwell;    // how long a crossing lasts
+  uint32_t s1, s2;
+  uint32_t modv;  // shows up when (hash % modv) == modr
+  uint32_t modr;
+};
+inline constexpr SkyFlyer SKY_DRAGON  = {400.f, 62.f, 0xD2A6047u, 0x11FEu, 3u, 0u};
+inline constexpr SkyFlyer SKY_UNICORN = {260.f, 46.f, 0x5EC2E7u, 0x0417u, 3u, 0u};
+inline constexpr SkyFlyer SKY_UFO     = {330.f, 52.f, 0x0F0B12u, 0x5A0CEu, 4u, 0u};
+inline constexpr SkyFlyer SKY_RIDER   = {290.f, 30.f, 0x21DE2u, 0xC10DDu, 3u, 1u};
+inline constexpr SkyFlyer SKY_WITCH   = {355.f, 40.f, 0x17C4Bu, 0xB2003u, 3u, 2u};
+
+// Is this flyer crossing right now? `age` is how far into the crossing it
+// is, and `h` the epoch hash the caller uses to pick lanes/colours.
+bool skyFlyerUp(const SkyFlyer& f, float seconds, float* age, uint32_t* h);
+
+// 0..1: how much is crossing the sky at this moment. The rarer the flyer,
+// the more it is worth musically.
+float skyTraffic01(float seconds);
+
+// How visible open-ocean swell is as colour, live via ~/.terrarium-swell
+// (0..1, default 0.30). 0 = deep water is texture and glitter only; 1 = full
+// rolling bands. The breaking surf where water shoals is NOT affected — that
+// always happens. Exists as a knob because the right amount is a matter of
+// taste and has to be judged on the panel, not in a screenshot.
+float displaySwell();
+
 // Brightness above 1.0, from the same ~/.terrarium-brightness file: a screen
 // curve applied at the end of shading (1.0 = off, up to 3.0). displayBrightness
 // still only attenuates, so every existing call site is unchanged.
 float displayLift();
+
+// How hard the final palette-harmony grade pulls, live via
+// ~/.terrarium-harmony (0..1, default 1.0). 0 = the raw authored colours,
+// 1 = the full chroma ceiling + split tone. A knob for the same reason
+// displaySwell is one: how much is a matter of taste, and taste has to be
+// judged on the panel rather than in a screenshot.
+float displayHarmony();
 
 // Display contrast 0.5..1.8 around mid-grey, live via ~/.terrarium-contrast
 // (same polling pattern as brightness). Missing file = 1.0.
