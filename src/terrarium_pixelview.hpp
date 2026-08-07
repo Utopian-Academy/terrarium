@@ -1636,9 +1636,40 @@ inline void pixelviewBiomeGrade(Biome bi, int& r, int& g, int& b) {
 inline void pixelviewBiomeSoil(Biome bi, int j, int x, int y, uint32_t seed,
                                int& r, int& g, int& b) {
   switch (bi) {
-    case MEADOW:   r = 84 + j / 2; g = 80 + j / 2; b = 52; break;  // dry olive
+    case MEADOW: {
+      // THE GROUND BETWEEN THE TUFTS, and it has to stay dark. A meadow is
+      // a third bare ground by area, and when per-biome soils came in this
+      // one went from luminance 23 to 81 — against grass at ~100 the value
+      // ratio collapsed from about 4:1 to 1.2:1, the vegetation stopped
+      // reading as sculpted masses, and the hillshade and canopy occlusion
+      // had nothing left to bite on. That is the whole reason the meadow
+      // stopped looking the way it did when the shading went in.
+      // Dark earth in the hollows, dry thatch where the sun reaches it,
+      // graded across a smooth field so it is soil rather than a flat mat.
+      float dry = pixelviewFbm2(x, y, 8.0f, seed ^ 0x6EA00u);
+      dry = std::clamp((dry - 0.32f) * 1.8f, 0.f, 1.f);
+      r = (int)(30.f + 32.f * dry) + j / 2;
+      g = (int)(26.f + 28.f * dry) + j / 2;
+      b = (int)(18.f + 15.f * dry);
+      break;
+    }
     case WETLAND:  r = 48 + j / 2; g = 46 + j / 2; b = 38; break;  // peat
-    case ALPINE:   r = 92 + j / 2; g = 96 + j / 2; b = 104; break; // scree
+    case ALPINE: {
+      // Scree, with FORM. It went from luminance 23 to a flat 92 in the same
+      // change that flattened the meadow, and a uniform mid-grey covering
+      // most of a mountain leaves the sparse alpine growth nothing to stand
+      // out against — the frames came out as one lavender-grey sheet. Rock
+      // is not one value: it is lit faces, shadowed hollows and darker wet
+      // stone. Two octaves so the mountain has both broad flanks and the
+      // broken texture of loose scree on top.
+      float f = pixelviewFbm2(x, y, 11.0f, seed ^ 0x5C2EEu);
+      float g2 = pixelviewValueNoise(x, y, 3.5f, seed ^ 0x10C5u);
+      float v = std::clamp(f * 0.74f + g2 * 0.26f, 0.f, 1.f);
+      r = (int)(46.f + 62.f * v) + j / 2;
+      g = (int)(50.f + 64.f * v) + j / 2;
+      b = (int)(56.f + 66.f * v);
+      break;
+    }
     case TROPICAL: {
       // Bare ground is the second most common thing in a tropical frame
       // (670 cells in 12100), and it was ALL near-black loam at luminance

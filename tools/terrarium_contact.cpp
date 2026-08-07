@@ -249,6 +249,79 @@ int selfTestSkyExits() {
   return bad;
 }
 
+// VALUE CONTRAST AUDIT.
+//
+// A landscape reads as sculpted when the ground it stands on is darker than
+// the things growing out of it — that gap is what the hillshade and the
+// canopy occlusion modulate, and if it collapses they have nothing to bite
+// on. Per-biome soils were introduced long after those, and nothing checked
+// what they did to the gap: meadow ground went from luminance 23 to 81 and
+// the ratio against its grass fell from about 4:1 to 1.2:1.
+//
+// So: for each biome, classify every cell and report the ratio. This exists
+// so the question "did that palette edit flatten anything?" is answerable in
+// one command instead of by looking at nine pictures.
+struct ToneClass {
+  const char* name;
+  double sum = 0;
+  int n = 0;
+  double mean() const { return n ? sum / n : 0.0; }
+};
+
+int toneAudit(int warm, float animT) {
+  std::printf("%-9s  %-6s %-6s %-6s %-6s   ground:veg\n", "biome", "ground",
+              "grass", "canopy", "rock");
+  int flat = 0;
+  for (int b = 0; b < BIOME_COUNT; ++b) {
+    if ((Biome)b == SKY) continue;          // no ground up there
+    Rng rng(1234u + (uint32_t)b * 77u);
+    World world;
+    seedWorld(world, rng, (Biome)b);
+    std::string banner;
+    for (int k = 0; k < warm; ++k) {
+      step(world, rng, banner, k);
+      g_stepEvents.clear();
+    }
+    ToneClass ground{"ground"}, grass{"grass"}, canopy{"canopy"}, rock{"rock"};
+    for (int y = 0; y < H; ++y) {
+      for (int x = 0; x < W; ++x) {
+        if (world.water[y][x] > 0) continue;
+        PixelviewRGB c = pixelviewCellColor(world, x, y, 0, animT);
+        double lum = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+        char t = world.terrain[y][x];
+        ToneClass* cls = nullptr;
+        if (t == '.' || t == 's') cls = &ground;
+        else if (t == ',' || t == '"' || t == ';' || t == ':') cls = &grass;
+        else if (t == 'T' || t == 'Y' || t == 'P' || t == '#') cls = &canopy;
+        else if (t == '^' || t == 'B' || t == 'M') cls = &rock;
+        if (!cls) continue;
+        cls->sum += lum;
+        cls->n++;
+      }
+    }
+    // Compare ground against whatever actually grows here.
+    double veg = 0.0;
+    int vn = grass.n + canopy.n;
+    if (vn) veg = (grass.sum + canopy.sum) / vn;
+    double ratio = (ground.mean() > 1.0 && veg > 1.0) ? veg / ground.mean() : 0.0;
+    const char* flag = "";
+    // Below ~1.35 the ground and the growth are the same value and the
+    // scene goes flat. Only the biomes whose SUBJECT is bright ground are
+    // exempt — sand and open sea. Alpine is deliberately NOT exempt even
+    // though it is mostly rock: that exemption is what let its scree sit at
+    // a flat 92 against vegetation at 111 and read as one grey sheet.
+    bool exempt = ((Biome)b == DESERT || (Biome)b == OCEAN ||
+                   (Biome)b == CITY);
+    if (!exempt && ratio > 0.0 && ratio < 1.35) { flag = "  <-- FLAT"; ++flat; }
+    std::printf("%-9s  %6.0f %6.0f %6.0f %6.0f   %5.2fx%s\n",
+                biomeName((Biome)b), ground.mean(), grass.mean(),
+                canopy.mean(), rock.mean(), ratio, flag);
+  }
+  std::printf("\n%s: %d biome(s) with collapsed ground/vegetation contrast\n",
+              flat ? "FAIL" : "ok", flat);
+  return flat;
+}
+
 int biomeFromName(const std::string& n) {
   for (int i = 0; i < BIOME_COUNT; ++i) {
     std::string bn = biomeName((Biome)i);
@@ -292,6 +365,7 @@ int main(int argc, char** argv) {
     else if (a == "--grey") { greyProbe = true; darkProbe = 255; }
     else if (a == "--selftest")
       return (selfTestBiomeNames() + selfTestSkyExits()) ? 1 : 0;
+    else if (a == "--tone") return toneAudit(warm, animT) ? 1 : 0;
     else if (a == "--daynight") g_daynightMode = std::atoi(need(i).c_str());
     else {
       std::fprintf(stderr, "unknown option: %s\n", a.c_str());
