@@ -298,7 +298,7 @@ struct PixelviewSkyCast {
   float ufoSpeed = 0.f, ufoVX = 0.f, ufoVY = 0.f;
   // A long eastern dragon, carried as a chain of body segments so it can
   // undulate. Serpentine, not winged — the body IS the animation.
-  static const int kDragonSegs = 16;
+  static const int kDragonSegs = 32;
   bool dragonUp = false;
   float dragX[kDragonSegs], dragY[kDragonSegs], dragR[kDragonSegs];
   uint32_t dragHue = 0;
@@ -485,7 +485,14 @@ inline PixelviewSkyCast& pixelviewSkyCast(float animT) {
       // fly off; it was switched off, mid-body, in plain view. The span now
       // carries the whole animal clear at both ends, derived from the lag
       // rather than guessed, so lengthening the dragon cannot bring it back.
-      const float kSegLag = 0.035f;
+      // SPACING IS THE WHOLE PROBLEM. Segments used to sit 0.035 screens
+      // apart — 4.9 cells — while carrying a radius of 2.15. Two circles 4.9
+      // apart whose radii total 4.3 DO NOT TOUCH, so the "body" was a row of
+      // evenly spaced identical beads swinging in step: a Newton's cradle,
+      // which is exactly what the owner called it. A serpent has to be one
+      // continuous mass, so the segments are now close enough to overlap
+      // heavily and there are twice as many of them for the same length.
+      const float kSegLag = 0.0125f;         // 1.75 cells at 140 wide
       const float kTailLag = (float)(PixelviewSkyCast::kDragonSegs - 1) * kSegLag;
       float headU = -0.28f + p * (1.56f + kTailLag);
       S.dragHue = hh;
@@ -494,15 +501,29 @@ inline PixelviewSkyCast& pixelviewSkyCast(float animT) {
         float uu = headU - lag;
         float sx2 = (dir > 0.f) ? uu * fw : fw - uu * fw;
         // The body swims: a wave that travels DOWN it, plus a slow overall
-        // rise and fall so it is not pinned to one altitude.
+        // rise and fall so it is not pinned to one altitude. The spatial
+        // frequency is tuned to the BODY, not the screen — a bit over one
+        // full wave along its length, so you read a serpent mid-undulation
+        // rather than a gentle arc.
         float sy2 = fh * lane
-                  + 7.5f * std::sin(uu * 9.0f - animT * 2.1f)
+                  + 6.0f * std::sin(uu * 20.0f - animT * 2.1f)
                   + 4.0f * std::sin(uu * 3.1f + animT * 0.5f);
         S.dragX[i] = sx2;
         S.dragY[i] = sy2;
-        // Thick at the shoulders, tapering to the tail.
+        // A proper profile: a head noticeably bigger than the neck, a swell
+        // at the shoulders, a long taper, and a floor on the radius so the
+        // tail stays joined instead of breaking back into beads at the tip.
+        // PROPORTION. The first attempt at this was 54 cells long and 3
+        // thick — a 15:1 ratio, which is a caterpillar. A dragon of this
+        // kind runs nearer 8:1, with a heavy head and shoulders and a long
+        // fall away to the tail.
         float t2 = (float)i / (float)(PixelviewSkyCast::kDragonSegs - 1);
-        S.dragR[i] = (i == 0) ? 2.5f : 2.15f * (1.f - t2 * 0.78f);
+        float body = 1.30f + 2.20f * std::pow(1.f - t2, 0.8f);
+        body *= 1.f + 0.16f * std::sin(3.14159f * std::min(1.f, t2 * 4.f));
+        // The last few widen again into a tail fin — a chain that simply
+        // stops reads as a chain; a creature ends in something.
+        if (t2 > 0.88f) body += 1.9f * (t2 - 0.88f) / 0.12f;
+        S.dragR[i] = (i == 0) ? 4.2f : body;
       }
     }
   }
@@ -1020,19 +1041,28 @@ inline void pixelviewSkyCell(const World& w, int x, int y, float animT,
   if (S.bannerUp) {
     float d = S.banDir;
     float bx = (fx - S.banX) * d, by = fy - S.banY;
-    // The aeroplane: smaller and rounder than an airliner, with a visible
-    // prop disc out front. It is a light aircraft and should look like one.
-    bool body = std::fabs(bx) < 2.4f && std::fabs(by) < 0.75f;
-    bool wing = std::fabs(bx) < 0.8f && std::fabs(by) < 2.3f;
-    bool fin  = bx < -1.5f && bx > -2.5f && by < 0.2f && by > -1.6f;
-    if (body || wing || fin) {
-      // Silver, so the BANNER is the coloured thing. A gold aircraft towing a
-      // gold banner read as one long smear with no tow line in the middle.
-      paint(214.f, 220.f, 230.f, 1.f);
-    } else if (std::fabs(bx - 2.9f) < 0.7f && std::fabs(by) < 1.5f) {
+    // An old BIPLANE, not a jet. At one cell per LED the silhouette is all
+    // you get, and the thing that reads as vintage is TWO STACKED WINGS with
+    // daylight between them — a single wing is a jet at any scale. So: a
+    // short fat fuselage, an upper and a lower wing joined by a strut, a
+    // tall rudder, and a big prop disc on the nose.
+    bool fuse = std::fabs(bx) < 2.3f && std::fabs(by + 0.1f) < 0.85f;
+    bool upper = std::fabs(bx - 0.2f) < 2.1f && std::fabs(by + 2.0f) < 0.55f;
+    bool lower = std::fabs(bx - 0.1f) < 1.7f && std::fabs(by - 1.0f) < 0.5f;
+    bool strut = std::fabs(bx - 1.1f) < 0.4f && by > -2.0f && by < 1.0f;
+    bool rudder = bx < -1.6f && bx > -2.6f && by < 0.1f && by > -2.2f;
+    bool tailpl = bx < -1.5f && bx > -2.8f && std::fabs(by - 0.1f) < 1.2f;
+    if (fuse || upper || lower || strut || rudder || tailpl) {
+      // Vintage livery: a red airframe with a cream flash along the
+      // fuselage. Warm and old, and nothing like the silver airliners that
+      // cross much higher up.
+      bool flash = fuse && by < -0.1f;
+      if (flash) paint(246.f, 236.f, 206.f, 1.f);
+      else       paint(178.f, 52.f, 48.f, 1.f);
+    } else if (std::fabs(bx - 2.9f) < 0.8f && std::fabs(by) < 1.9f) {
       // Prop disc: a smear, not blades. At 1px/cell a spinning propeller is
       // a translucent arc and nothing else reads as one.
-      float sp = 0.35f + 0.3f * std::sin(animT * 22.f + by);
+      float sp = 0.32f + 0.30f * std::sin(animT * 22.f + by * 1.7f);
       paint(250.f, 250.f, 240.f, sp);
     }
     // The banner. It starts a few cells behind the tail and streams back,
@@ -1205,6 +1235,9 @@ inline void pixelviewSkyCell(const World& w, int x, int y, float animT,
     for (int i = PixelviewSkyCast::kDragonSegs - 1; i >= 0; --i) {
       float ddx = fx - S.dragX[i], ddy = fy - S.dragY[i];
       float R = S.dragR[i];
+      // Cheap rejection before the divide: with 32 segments most of them are
+      // nowhere near any given cell.
+      if (std::fabs(ddx) > R || std::fabs(ddy) > R) continue;
       float d2 = (ddx * ddx + ddy * ddy) / (R * R);
       if (d2 >= 1.f) continue;
       // Rounded body with a lighter belly ridge along the underside.
@@ -1224,9 +1257,86 @@ inline void pixelviewSkyCell(const World& w, int x, int y, float animT,
           paint(255.f, 196.f, 70.f, 1.f);
       }
       // A mane runs the first third of the body.
-      if (i > 0 && i < 6 && ddy < -R * 0.55f) {
-        float m = 0.6f + 0.4f * std::sin(animT * 3.f + (float)i);
+      if (i > 0 && i < 11 && ddy < -R * 0.55f) {
+        float m = 0.6f + 0.4f * std::sin(animT * 3.f + (float)i * 0.5f);
         paint(250.f, 232.f, 170.f, 0.55f * m);
+      }
+    }
+    // DORSAL CREST, drawn ON TOP of the body. It was originally drawn first,
+    // on the theory that the body's edge would tidy up the base — but on a
+    // curving body each spine's base falls inside the NEXT segment's circle,
+    // so the body painted over nearly all of it and what survived read as
+    // gold confetti floating alongside the animal. A crest sits on the
+    // creature; it is not underneath it.
+    //
+    // Every segment gets one, so the ridge is continuous and serrated rather
+    // than a row of isolated spikes, and each stands off the normal to the
+    // local tangent so it stays on the back through the undulation instead
+    // of swinging out of the belly on the downstroke.
+    // Which way the animal is going, taken over its whole length. The side
+    // the crest sits on is chosen from THAT and not from the local slope:
+    // testing "is this normal pointing up" flips the crest to the underside
+    // wherever the body turns past vertical, which put the ridge on the
+    // dragon's belly at the end of every upstroke.
+    const float trav =
+        (S.dragX[0] > S.dragX[PixelviewSkyCast::kDragonSegs - 1]) ? 1.f : -1.f;
+    for (int i = 1; i < PixelviewSkyCast::kDragonSegs - 2; ++i) {
+      float R = S.dragR[i];
+      float tx2 = S.dragX[i] - S.dragX[i + 1];
+      float ty2 = S.dragY[i] - S.dragY[i + 1];
+      float tl = std::sqrt(tx2 * tx2 + ty2 * ty2);
+      if (tl < 0.001f) continue;
+      tx2 /= tl; ty2 /= tl;
+      float nx2 = trav * ty2, ny2 = -trav * tx2;
+      // Alternating heights give the ridge its saw edge.
+      float hgt = (1.05f + ((i & 1) ? 0.75f : 0.f)) * (R / 3.0f);
+      for (int k = 0; k < 3; ++k) {
+        float f2 = (float)k / 2.f;
+        float px2 = S.dragX[i] + nx2 * (R - 0.7f + hgt * f2);
+        float py2 = S.dragY[i] + ny2 * (R - 0.7f + hgt * f2);
+        float wdt = 0.78f * (1.f - f2 * 0.55f);
+        // Gold, not a shade of the scales: against a pale belly a pale spine
+        // is invisible. It also matches the mane, so crest and mane read as
+        // one ridge running the whole length.
+        if (std::fabs(fx - px2) < wdt && std::fabs(fy - py2) < wdt)
+          paint(250.f, 222.f, 138.f, 0.95f);
+      }
+    }
+
+    // LIMBS. Two pairs of little clawed legs, at the shoulders and the hips,
+    // paddling as it swims. An Eastern dragon's legs are small and mostly
+    // decorative, which is perfect here: four short strokes off the body
+    // remove any remaining reading of this as a chain of beads.
+    {
+      const int kHip[2] = {5, 17};
+      for (int L = 0; L < 2; ++L) {
+        int i = kHip[L];
+        float bx3 = S.dragX[i], by3 = S.dragY[i];
+        // Which way the body is heading, so the legs hang off its side.
+        float axx = S.dragX[i] - S.dragX[i + 1];
+        float ayy = S.dragY[i] - S.dragY[i + 1];
+        float al = std::sqrt(axx * axx + ayy * ayy);
+        if (al < 0.001f) continue;
+        axx /= al; ayy /= al;
+        for (int s2 = -1; s2 <= 1; s2 += 2) {
+          // Perpendicular to travel, with a paddling swing.
+          float sw = 0.55f * std::sin(animT * 3.6f + (float)L * 2.0f +
+                                      (float)s2 * 1.1f);
+          for (int k = 1; k <= 3; ++k) {
+            // Start at the body's surface, or the leg's first joints are
+            // buried inside it and only the claw shows.
+            float ext = S.dragR[i] * 0.75f + 0.85f * (float)k;
+            float lx = bx3 - ayy * (float)s2 * ext + axx * sw * (float)k;
+            float ly = by3 + axx * (float)s2 * ext + ayy * sw * (float)k;
+            if (std::fabs(fx - lx) < 0.62f && std::fabs(fy - ly) < 0.62f) {
+              // The last joint is a claw, and paler.
+              bool claw = (k == 3);
+              paint(claw ? 250.f : (float)pal[0] * 1.25f,
+                    claw ? 240.f : (float)pal[1] * 1.25f,
+                    claw ? 200.f : (float)pal[2] * 1.25f, claw ? 0.95f : 1.f);
+            }
+          }
+        }
       }
     }
     // Whiskers, trailing back from the head.
