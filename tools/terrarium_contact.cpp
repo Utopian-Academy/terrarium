@@ -200,18 +200,30 @@ int selfTestSkyExits() {
     int crossings = 0, badEntry = 0, badExit = 0;
     bool everInside = false;
   };
-  Track tr[6] = {{"dragon"}, {"unicorn"}, {"ufo"}, {"rider"}, {"witch"},
-                 {"balloon0"}};
+  // Anything with LENGTH needs its trailing end probed as well as its head.
+  // This test passed a dragon that vanished with two thirds of its body over
+  // the disc, because it only ever looked at segment 0 — the one part of the
+  // animal guaranteed to be clear first. The rule is about the whole object,
+  // so every extremity gets its own row.
+  const int kN = 9;
+  Track tr[kN] = {{"dragon-head"}, {"dragon-tail"}, {"unicorn"}, {"ufo"},
+                  {"rider"},       {"witch"},       {"balloon0"},
+                  {"banner-tail"}, {"chopper-wall"}};
 
   for (float t = 0.f; t < 4000.f; t += 0.20f) {
     const PixelviewSkyCast& S = pixelviewSkyCast(t);
-    bool up[6] = {S.dragonUp, S.unicornUp, S.ufoUp, S.riderUp, S.witchUp,
-                  S.balloonUp[0]};
-    float px[6] = {S.dragX[0], S.uniX, S.ufoX, S.riderX, S.witchX,
-                   S.balloonX[0]};
-    float py[6] = {S.dragY[0], S.uniY, S.ufoY, S.riderY, S.witchY,
-                   S.balloonY[0]};
-    for (int k = 0; k < 6; ++k) {
+    const int kTail = PixelviewSkyCast::kDragonSegs - 1;
+    // The banner streams ~27 cells behind the aircraft; the video wall hangs
+    // below and behind the helicopter and swings. Probe where they actually
+    // END, not where their tow point is.
+    float banTailX = S.banX - S.banDir * 27.f;
+    bool up[kN] = {S.dragonUp,  S.dragonUp, S.unicornUp, S.ufoUp, S.riderUp,
+                   S.witchUp,   S.balloonUp[0], S.bannerUp, S.chopUp};
+    float px[kN] = {S.dragX[0], S.dragX[kTail], S.uniX, S.ufoX, S.riderX,
+                    S.witchX,   S.balloonX[0], banTailX, S.wallX};
+    float py[kN] = {S.dragY[0], S.dragY[kTail], S.uniY, S.ufoY, S.riderY,
+                    S.witchY,   S.balloonY[0], S.banY, S.wallY};
+    for (int k = 0; k < kN; ++k) {
       Track& q = tr[k];
       if (up[k]) {
         if (!q.was) {                       // first frame of a crossing
@@ -248,6 +260,32 @@ int selfTestSkyExits() {
   (void)vis;
   std::printf("%s: sky exits\n", bad ? "FAIL" : "ok");
   return bad;
+}
+
+// When is each thing actually up? Sky traffic is rare by design, so finding
+// the frame where the helicopter is mid-crossing used to mean rendering at
+// guessed times until one turned up. Prints the midpoint of each crossing,
+// which is the animT to pass to --animt.
+int skySchedule(float upTo) {
+  struct E { const char* name; const SkyFlyer* f; };
+  static const E kAll[] = {
+      {"dragon", &SKY_DRAGON}, {"unicorn", &SKY_UNICORN}, {"ufo", &SKY_UFO},
+      {"rider", &SKY_RIDER},   {"witch", &SKY_WITCH},     {"banner", &SKY_BANNER},
+      {"chopper", &SKY_CHOPPER}};
+  for (const E& e : kAll) {
+    std::printf("%-8s dwell %5.0fs  mid-crossing at animT:", e.name, e.f->dwell);
+    int shown = 0;
+    bool was = false;
+    float start = 0.f;
+    for (float t = 0.f; t < upTo && shown < 8; t += 0.25f) {
+      bool up = skyFlyerUp(*e.f, t, nullptr, nullptr);
+      if (up && !was) start = t;
+      if (!up && was) { std::printf(" %.0f", (start + t) * 0.5f); ++shown; }
+      was = up;
+    }
+    std::printf("\n");
+  }
+  return 0;
 }
 
 // VALUE CONTRAST AUDIT.
@@ -321,6 +359,85 @@ int toneAudit(int warm, float animT) {
   std::printf("\n%s: %d biome(s) with collapsed ground/vegetation contrast\n",
               flat ? "FAIL" : "ok", flat);
   return flat;
+}
+
+// How many colours do the flowers actually come in, and do they arrange
+// themselves into drifts or into confetti? Both questions are invisible in a
+// normal render, because blooms are sparse — you cannot judge a palette from
+// forty scattered dots. So plant every dry cell and look at the result.
+//
+// The census counts DISTINCT colours after quantising to 16 levels a channel,
+// which is roughly the resolution at which the eye calls two flowers "the
+// same colour". Per-flower tone jitter would otherwise report every bloom as
+// unique and tell us nothing.
+int bloomAudit(int warm, float animT, const char* out, int scale) {
+  const int nb = BIOME_COUNT;
+  Image sheet(W * scale, H * scale * nb);
+  std::printf("%-9s  %8s  %8s   %s\n", "biome", "distinct", "patchy",
+              "(distinct hues at 16-level quantisation)");
+  for (int b = 0; b < nb; ++b) {
+    Rng rng(1234u + (uint32_t)b * 77u);
+    World world;
+    seedWorld(world, rng, (Biome)b);
+    std::string banner;
+    for (int k = 0; k < warm; ++k) { step(world, rng, banner, k); g_stepEvents.clear(); }
+    // Plant the whole biome, with the glyph mix worldgen actually produces:
+    // mostly small blooms, the showy ones occasional. (Alternating all four
+    // in a checkerboard reads as low drift no matter what the drift field is
+    // doing, because big blooms deliberately draw from elsewhere in the list
+    // — the test was measuring its own planting pattern.)
+    for (int y = 0; y < H; ++y) {
+      for (int x = 0; x < W; ++x) {
+        if (world.water[y][x] > 0) continue;
+        uint32_t g = hash3((uint32_t)x, (uint32_t)y, 0x0F10E5u) % 100u;
+        world.terrain[y][x] = (g < 45u) ? 'f' : (g < 90u) ? '+'
+                            : (g < 97u) ? '&' : '!';
+      }
+    }
+
+    std::vector<uint8_t> seen(16 * 16 * 16, 0);
+    long same = 0, pairs = 0;
+    for (int y = 0; y < H; ++y) {
+      for (int x = 0; x < W; ++x) {
+        PixelviewRGB c = pixelviewCellColor(world, x, y, 0, animT);
+        for (int sy = 0; sy < scale; ++sy)
+          for (int sx = 0; sx < scale; ++sx)
+            sheet.set(x * scale + sx, (b * H + y) * scale + sy, c.r, c.g, c.b);
+        if (world.water[y][x] > 0) continue;
+        seen[((c.r >> 4) * 16 + (c.g >> 4)) * 16 + (c.b >> 4)] = 1;
+        // Drift check: how often does a bloom share its right-hand
+        // neighbour's SPECIES? Confetti over n species sits near 1/n; drifts
+        // run well above it. Measured on species rather than final colour,
+        // because the per-flower tone jitter hides the structure from any
+        // test that only looks at pixels — which is how this metric first
+        // reported 3% for a field that visibly comes in patches.
+        if (x + 1 < W && world.water[y][x + 1] == 0) {
+          int s0 = -1, s1 = -2, rr, gg, bb;
+          uint32_t h0 = hash3((uint32_t)x, (uint32_t)y, world.worldSeed);
+          uint32_t h1 = hash3((uint32_t)(x + 1), (uint32_t)y, world.worldSeed);
+          pixelviewFlowerColor(world, world.terrain[y][x], x, y, h0, rr, gg, bb,
+                               &s0);
+          pixelviewFlowerColor(world, world.terrain[y][x + 1], x + 1, y, h1, rr,
+                               gg, bb, &s1);
+          if (s0 == s1) ++same;
+          ++pairs;
+        }
+      }
+    }
+    int distinct = 0;
+    for (uint8_t v : seen) distinct += v;
+    int nsp = 0;
+    pixelviewBloomList((Biome)b, nsp);
+    std::printf("%-9s  %8d  %7.1f%%  (confetti would be %.1f%% over %d species)\n",
+                biomeName((Biome)b), distinct,
+                pairs ? 100.0 * (double)same / (double)pairs : 0.0,
+                100.0 / (double)nsp, nsp);
+  }
+  if (out && *out && !writeBmp(sheet, out))
+    std::printf("could not write %s\n", out);
+  else if (out && *out)
+    std::printf("\nwrote %s\n", out);
+  return 0;
 }
 
 // How expensive is a frame, per biome? The kiosk is a 512MB Pi Zero 2
@@ -403,6 +520,8 @@ int main(int argc, char** argv) {
     else if (a == "--selftest")
       return (selfTestBiomeNames() + selfTestSkyExits()) ? 1 : 0;
     else if (a == "--tone") return toneAudit(warm, animT) ? 1 : 0;
+    else if (a == "--sky-schedule") return skySchedule(6000.f);
+    else if (a == "--blooms") return bloomAudit(warm, animT, out.c_str(), scale);
     else if (a == "--bench") return benchBiomes(warm, 8);
     else if (a == "--daynight") g_daynightMode = std::atoi(need(i).c_str());
     else {

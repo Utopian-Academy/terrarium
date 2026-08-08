@@ -558,6 +558,14 @@ inline constexpr SkyFlyer SKY_UNICORN = {260.f, 46.f, 0x5EC2E7u, 0x0417u, 3u, 0u
 inline constexpr SkyFlyer SKY_UFO     = {330.f, 52.f, 0x0F0B12u, 0x5A0CEu, 4u, 0u};
 inline constexpr SkyFlyer SKY_RIDER   = {290.f, 30.f, 0x21DE2u, 0xC10DDu, 3u, 1u};
 inline constexpr SkyFlyer SKY_WITCH   = {355.f, 40.f, 0x17C4Bu, 0xB2003u, 3u, 2u};
+// A little plane towing an advertising banner. Low, level and SLOW — that is
+// its whole identity next to the airliners, which are high, fast, and take
+// any heading they like. Its crossing is long because a banner you cannot
+// read the length of is just a smear.
+inline constexpr SkyFlyer SKY_BANNER  = {310.f, 54.f, 0xBA22E7u, 0x9F10Du, 3u, 1u};
+// A helicopter towing an LED video wall on a chain. The rarest thing in the
+// sky and the only one that is itself a light source.
+inline constexpr SkyFlyer SKY_CHOPPER = {430.f, 72.f, 0xC40FFEu, 0x3E1A5u, 4u, 1u};
 
 // Is this flyer crossing right now? `age` is how far into the crossing it
 // is, and `h` the epoch hash the caller uses to pick lanes/colours.

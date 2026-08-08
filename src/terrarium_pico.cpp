@@ -387,10 +387,14 @@ int main(int argc, char** argv) {
       int pitch = 0;
       if (SDL_LockTexture(frame, nullptr, &pixels, &pitch) == 0) {
         float animT = (float)SDL_GetTicks() * 0.001f;
-        // Camera: pixel-perfect while dwelling (a 1:1 LED panel makes any
-        // fractional zoom inherently soft), cinematic only while traveling —
-        // a gentle push-in swells and settles across the voyage crossing.
-        float kbZ = 1.f, kbCx = (float)W * 0.5f, kbCy = (float)H * 0.5f;
+        // The camera is ALWAYS 1:1. There used to be a gentle push-in across
+        // the crossing — a nice idea on a screen, a bad one here. A 1.10x
+        // zoom on a 140-cell panel lands every cell between two LEDs, so all
+        // 28 seconds of every crossing came out soft, and it read as the
+        // whole picture drifting out of focus and then recovering. Which is
+        // precisely what it was doing. The dissolve below IS the crossing; it
+        // does not need help from a lens. No resampling happens anywhere in
+        // this path now, so the softness cannot come back.
         // Voyage crossing progress, 0..1 (see the dissolve below).
         float panT = 0.f;
         if (panning) {
@@ -402,8 +406,6 @@ int main(int argc, char** argv) {
             lastDriftMs = SDL_GetTicks();
           } else {
             panT = p * p * (3.f - 2.f * p);  // ease the crossing
-            // Push-in that peaks mid-crossing and settles on arrival.
-            kbZ = 1.f + 0.10f * std::sin(p * 3.14159f);
           }
         }
 
@@ -417,34 +419,12 @@ int main(int argc, char** argv) {
             for (int x = 0; x < W; ++x)
               baseB[(size_t)y * W + x] = cellColor(nextWorld, x, y, nextTick, animT);
 
-        // Pass 2: camera warp with bilinear sampling — sub-pixel smooth,
-        // no crawling line artifacts from nearest-neighbour zoom.
-        auto sampleBi = [&](const std::vector<uint32_t>& buf, float sx, float sy) {
-          sx = std::clamp(sx, 0.f, (float)W - 1.001f);
-          sy = std::clamp(sy, 0.f, (float)H - 1.001f);
-          int x0 = (int)sx, y0 = (int)sy;
-          float fx2 = sx - (float)x0, fy2 = sy - (float)y0;
-          uint32_t p00 = buf[(size_t)y0 * W + x0];
-          uint32_t p10 = buf[(size_t)y0 * W + x0 + 1];
-          uint32_t p01 = buf[(size_t)(y0 + 1) * W + x0];
-          uint32_t p11 = buf[(size_t)(y0 + 1) * W + x0 + 1];
-          auto ch = [&](int sh) {
-            float a = (float)((p00 >> sh) & 0xFF) * (1.f - fx2) +
-                      (float)((p10 >> sh) & 0xFF) * fx2;
-            float b = (float)((p01 >> sh) & 0xFF) * (1.f - fx2) +
-                      (float)((p11 >> sh) & 0xFF) * fx2;
-            return (uint32_t)(a * (1.f - fy2) + b * fy2);
-          };
-          return 0xFF000000u | (ch(16) << 16) | (ch(8) << 8) | ch(0);
-        };
-
         // The disc only shows a `panelN`-cell square of the world, taken from
         // the middle; the circle mask is measured against THAT, not the
         // compiled world size, so a world built larger than the panel can be
         // aligned live (see resolvePanel above).
         const float cc = (float)cropX + (float)(panelN - 1) * 0.5f;
         const float rad = (float)panelN * 0.5f;
-        const bool warp = (kbZ != 1.f) || panning;
         for (int y = 0; y < H; ++y) {
           uint32_t* row = (uint32_t*)((uint8_t*)pixels + y * pitch);
           for (int x = 0; x < W; ++x) {
@@ -454,44 +434,39 @@ int main(int argc, char** argv) {
               row[x] = px;
               continue;
             }
-            if (!warp) {
+            if (!panning) {
               px = baseA[(size_t)y * W + x];
             } else {
-              float wxf = kbCx + ((float)x - (float)W * 0.5f) / kbZ;
-              float wyf = kbCy + ((float)y - (float)H * 0.5f) / kbZ;
-              if (!panning) {
-                px = sampleBi(baseA, wxf, wyf);
-              } else {
-                // A DISSOLVE, not a wipe. The old crossing slid world B in
-                // from the right, which put a hard vertical seam down the
-                // middle of the disc — the one straight line in a world that
-                // has none, travelling at constant speed. Instead both
-                // worlds are rendered in place and a soft threshold sweeps
-                // across a noise field: where the field is low the new world
-                // arrives first, so the boundary is a ragged front that
-                // fingers and pools like weather coming in. Each cell still
-                // crosses over exactly once, and no cell crosses twice.
-                uint32_t a2 = sampleBi(baseA, wxf, wyf);
-                uint32_t b3 = sampleBi(baseB, wxf, wyf);
-                // Two octaves so the front has both large lobes and a
-                // frayed edge, plus a gentle left-to-right bias so the
-                // change still reads as travelling rather than blinking.
-                float n = pixelviewFbm2(x, y, 26.f, 0x7A0E1u);
-                float bias = (float)x / (float)W;
-                float field = n * 0.72f + bias * 0.28f;
-                // The threshold oversteps 0..1 at both ends by the width of
-                // the blend band, so the crossing genuinely finishes.
-                const float kBand = 0.34f;
-                float thr = panT * (1.f + 2.f * kBand) - kBand;
-                float m = std::clamp((thr - field) / kBand + 0.5f, 0.f, 1.f);
-                m = m * m * (3.f - 2.f * m);            // ease the handover
-                auto mix = [&](int sh) {
-                  float av = (float)((a2 >> sh) & 0xFF);
-                  float bv = (float)((b3 >> sh) & 0xFF);
-                  return (uint32_t)(av + (bv - av) * m);
-                };
-                px = 0xFF000000u | (mix(16) << 16) | (mix(8) << 8) | mix(0);
-              }
+              // A DISSOLVE, not a wipe. The old crossing slid world B in
+              // from the right, which put a hard vertical seam down the
+              // middle of the disc — the one straight line in a world that
+              // has none, travelling at constant speed. Instead both worlds
+              // are rendered in place, each cell read straight out of its
+              // own buffer, and a soft threshold sweeps across a noise
+              // field: where the field is low the new world arrives first,
+              // so the boundary is a ragged front that fingers and pools
+              // like weather coming in. Each cell still crosses over exactly
+              // once, and no cell crosses twice.
+              uint32_t a2 = baseA[(size_t)y * W + x];
+              uint32_t b3 = baseB[(size_t)y * W + x];
+              // Two octaves so the front has both large lobes and a frayed
+              // edge, plus a gentle left-to-right bias so the change still
+              // reads as travelling rather than blinking.
+              float n = pixelviewFbm2(x, y, 26.f, 0x7A0E1u);
+              float bias = (float)x / (float)W;
+              float field = n * 0.72f + bias * 0.28f;
+              // The threshold oversteps 0..1 at both ends by the width of
+              // the blend band, so the crossing genuinely finishes.
+              const float kBand = 0.34f;
+              float thr = panT * (1.f + 2.f * kBand) - kBand;
+              float m = std::clamp((thr - field) / kBand + 0.5f, 0.f, 1.f);
+              m = m * m * (3.f - 2.f * m);            // ease the handover
+              auto mix = [&](int sh) {
+                float av = (float)((a2 >> sh) & 0xFF);
+                float bv = (float)((b3 >> sh) & 0xFF);
+                return (uint32_t)(av + (bv - av) * m);
+              };
+              px = 0xFF000000u | (mix(16) << 16) | (mix(8) << 8) | mix(0);
             }
             if (opt.circle) {
               float dx = (float)x - cc;
