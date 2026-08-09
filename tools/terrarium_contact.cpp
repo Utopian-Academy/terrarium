@@ -211,7 +211,13 @@ int selfTestSkyExits() {
                   {"banner-tail"}, {"chopper-wall"},
                   {"airship-nose"}, {"airship-flag"}};
 
-  for (float t = 0.f; t < 4000.f; t += 0.20f) {
+  // Walk long enough that the RAREST flyer still gets sampled many times.
+  // This was 4000s, which covered everything until the dragon's rarity was
+  // dialled down — its first crossing then landed at 4031 and the test went
+  // straight from "off-panel" to "no crossings sampled" without failing. A
+  // coverage hole is quieter than a failure, so the window is now sized off
+  // the rarest schedule rather than left at whatever was once enough.
+  for (float t = 0.f; t < 40000.f; t += 0.20f) {
     const PixelviewSkyCast& S = pixelviewSkyCast(t);
     const int kTail = PixelviewSkyCast::kDragonSegs - 1;
     // The banner streams ~27 cells behind the aircraft; the video wall hangs

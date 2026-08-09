@@ -553,7 +553,13 @@ struct SkyFlyer {
   uint32_t modv;  // shows up when (hash % modv) == modr
   uint32_t modr;
 };
-inline constexpr SkyFlyer SKY_DRAGON  = {400.f, 62.f, 0xD2A6047u, 0x11FEu, 3u, 0u};
+// The dragon is the biggest thing in the sky by a wide margin — it spans
+// most of the disc — and at one crossing every ~17 minutes it stopped being
+// an event and became the weather. `modv` is the rarity dial: the flyer is
+// up on 1 epoch in `modv`, so at a 400s period this is now roughly one
+// crossing every 87 minutes. Rare enough that seeing it is luck, often
+// enough that a long sitting will catch one.
+inline constexpr SkyFlyer SKY_DRAGON  = {400.f, 62.f, 0xD2A6047u, 0x11FEu, 13u, 0u};
 inline constexpr SkyFlyer SKY_UNICORN = {260.f, 46.f, 0x5EC2E7u, 0x0417u, 3u, 0u};
 inline constexpr SkyFlyer SKY_UFO     = {330.f, 52.f, 0x0F0B12u, 0x5A0CEu, 4u, 0u};
 inline constexpr SkyFlyer SKY_RIDER   = {290.f, 30.f, 0x21DE2u, 0xC10DDu, 3u, 1u};

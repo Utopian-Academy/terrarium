@@ -577,8 +577,12 @@ inline PixelviewSkyCast& pixelviewSkyCast(float animT) {
       S.banDir = ((hh >> 7) & 1u) ? 1.f : -1.f;
       float lane = 0.22f + 0.5f * (float)((hh >> 13) & 255u) / 255.f;
       // The span clears the panel by the full length of the banner at both
-      // ends, or the tail of it would wink out over the disc.
-      const float kTow = 30.f;
+      // ends, or the tail of it would wink out over the disc. The cloth ends
+      // 26.5 cells behind the aircraft, and 30 left the tail exactly ONE
+      // cell inside the visible disc at the end of a crossing — close enough
+      // that the old 4000s test window sampled a single crossing and passed.
+      // Widening that window found it. 38 clears with room.
+      const float kTow = 38.f;
       S.banX = (S.banDir > 0.f) ? (-kTow + p * (fw + kTow * 2.f))
                                 : (fw + kTow - p * (fw + kTow * 2.f));
       S.banY = fh * lane + 1.1f * std::sin(animT * 0.7f);   // a gentle bob
