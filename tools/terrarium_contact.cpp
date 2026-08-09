@@ -302,6 +302,114 @@ int skySchedule(float upTo) {
   return 0;
 }
 
+// Is the sky MUSICALLY alive, or just pretty? `sky_traffic` (mod 68) is the
+// sky's identity source, and it is driven entirely by the flyer schedule --
+// so every rarity tweak is silently a composition change. Making the dragon
+// four times rarer removed the single highest-weighted contributor, which is
+// exactly the sort of edit that leaves a biome looking fine and sounding
+// dead. This walks a long stretch and reports what the source actually does.
+int skyMusicAudit(float upTo) {
+  struct E { const char* name; const SkyFlyer* f; float weight; };
+  static const E kAll[] = {
+      {"dragon", &SKY_DRAGON, 1.00f},   {"unicorn", &SKY_UNICORN, 0.85f},
+      {"ufo", &SKY_UFO, 0.80f},         {"rider", &SKY_RIDER, 0.55f},
+      {"witch", &SKY_WITCH, 0.65f},     {"banner", &SKY_BANNER, 0.45f},
+      {"chopper", &SKY_CHOPPER, 0.95f}, {"airship", &SKY_AIRSHIP, 0.70f}};
+  const float dt = 0.5f;
+  int steps = 0, anyUp = 0;
+  double sum = 0.0, peak = 0.0;
+  int bucket[5] = {0, 0, 0, 0, 0};      // 0, <.25, <.5, <.75, >=.75
+  int upCount[8] = {0};
+  long quiet = 0, longestQuiet = 0;     // longest stretch with nothing up
+  for (float t = 0.f; t < upTo; t += dt) {
+    ++steps;
+    for (int k = 0; k < 8; ++k)
+      if (skyFlyerUp(*kAll[k].f, t, nullptr, nullptr)) ++upCount[k];
+    float v = skyTraffic01(t);
+    sum += v;
+    if (v > peak) peak = v;
+    if (v > 0.0001f) {
+      ++anyUp;
+      quiet = 0;
+    } else {
+      ++quiet;
+      if (quiet > longestQuiet) longestQuiet = quiet;
+    }
+    int b = (v <= 0.0001f) ? 0 : (v < 0.25f) ? 1 : (v < 0.5f) ? 2
+                                             : (v < 0.75f) ? 3 : 4;
+    ++bucket[b];
+  }
+  std::printf("sky traffic over %.0f minutes\n\n", upTo / 60.f);
+  std::printf("  %-9s %8s  %s\n", "flyer", "up", "one crossing every");
+  for (int k = 0; k < 8; ++k) {
+    double frac = (double)upCount[k] / (double)steps;
+    double every = (frac > 0.0) ? (upTo * (double)kAll[k].f->dwell /
+                                   (upTo * frac)) : 0.0;
+    std::printf("  %-9s %7.2f%%  %.0f min   (weight %.2f)\n", kAll[k].name,
+                100.0 * frac, every / 60.0, kAll[k].weight);
+  }
+  std::printf("\n  something in the sky   %.1f%% of the time\n",
+              100.0 * (double)anyUp / (double)steps);
+  std::printf("  mean sky_traffic       %.3f   peak %.3f\n",
+              sum / (double)steps, peak);
+  std::printf("  longest empty stretch  %.0f min\n",
+              (double)longestQuiet * dt / 60.0);
+  std::printf("  distribution           floor %.1f%%  low %.1f%%  mid %.1f%%"
+              "  high %.1f%%  full %.1f%%\n",
+              100.0 * bucket[0] / steps, 100.0 * bucket[1] / steps,
+              100.0 * bucket[2] / steps, 100.0 * bucket[3] / steps,
+              100.0 * bucket[4] / steps);
+  // A modulation source that sits at its floor almost always is not a
+  // modulation source. The sky should have something crossing a good part of
+  // the time, and should not go silent for the length of a gallery visit.
+  int bad = 0;
+  if ((double)anyUp / (double)steps < 0.25) {
+    std::printf("\nFAIL: the sky is empty %.0f%% of the time - sky_traffic is"
+                " effectively dead\n", 100.0 * (1.0 - (double)anyUp / steps));
+    ++bad;
+  }
+  if ((double)longestQuiet * dt > 1800.0) {
+    std::printf("\nFAIL: %.0f minutes with nothing in the sky at all\n",
+                (double)longestQuiet * dt / 60.0);
+    ++bad;
+  }
+  // EVERY flyer must actually reach the modulation source. The table above
+  // is this harness's own copy of the weights, so it would print exactly the
+  // same numbers if a flyer had been left out of the real skyTraffic01 in
+  // core -- which is the whole failure mode worth testing for, since adding
+  // a flyer means editing two places. So: find a moment when each one is up
+  // ALONE, and check the source is off its floor. If it is not, that flyer
+  // is decorative and the music does not know it exists.
+  std::printf("\n  %-9s %s\n", "flyer", "reaches sky_traffic when alone");
+  for (int k = 0; k < 8; ++k) {
+    bool tested = false, ok = false;
+    for (float t = 0.f; t < upTo && !tested; t += dt) {
+      if (!skyFlyerUp(*kAll[k].f, t, nullptr, nullptr)) continue;
+      bool alone = true;
+      for (int j = 0; j < 8; ++j)
+        if (j != k && skyFlyerUp(*kAll[j].f, t, nullptr, nullptr)) alone = false;
+      if (!alone) continue;
+      // Mid-crossing, where the sine envelope is near its peak.
+      float age = 0.f;
+      skyFlyerUp(*kAll[k].f, t, &age, nullptr);
+      if (age < kAll[k].f->dwell * 0.35f) continue;
+      tested = true;
+      ok = skyTraffic01(t) > 0.05f;
+    }
+    if (!tested) {
+      std::printf("  %-9s never observed alone - not proven\n", kAll[k].name);
+    } else if (!ok) {
+      std::printf("  %-9s *** SILENT - missing from skyTraffic01 ***\n",
+                  kAll[k].name);
+      ++bad;
+    } else {
+      std::printf("  %-9s yes\n", kAll[k].name);
+    }
+  }
+  if (!bad) std::printf("\nok: sky traffic\n");
+  return bad;
+}
+
 // VALUE CONTRAST AUDIT.
 //
 // A landscape reads as sculpted when the ground it stands on is darker than
@@ -534,6 +642,7 @@ int main(int argc, char** argv) {
     else if (a == "--selftest")
       return (selfTestBiomeNames() + selfTestSkyExits()) ? 1 : 0;
     else if (a == "--tone") return toneAudit(warm, animT) ? 1 : 0;
+    else if (a == "--sky-music") return skyMusicAudit(72000.f);
     else if (a == "--sky-schedule") return skySchedule(6000.f);
     else if (a == "--blooms") return bloomAudit(warm, animT, out.c_str(), scale);
     else if (a == "--bench") return benchBiomes(warm, 8);
