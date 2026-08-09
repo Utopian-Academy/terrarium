@@ -205,10 +205,11 @@ int selfTestSkyExits() {
   // the disc, because it only ever looked at segment 0 — the one part of the
   // animal guaranteed to be clear first. The rule is about the whole object,
   // so every extremity gets its own row.
-  const int kN = 9;
+  const int kN = 11;
   Track tr[kN] = {{"dragon-head"}, {"dragon-tail"}, {"unicorn"}, {"ufo"},
                   {"rider"},       {"witch"},       {"balloon0"},
-                  {"banner-tail"}, {"chopper-wall"}};
+                  {"banner-tail"}, {"chopper-wall"},
+                  {"airship-nose"}, {"airship-flag"}};
 
   for (float t = 0.f; t < 4000.f; t += 0.20f) {
     const PixelviewSkyCast& S = pixelviewSkyCast(t);
@@ -217,12 +218,19 @@ int selfTestSkyExits() {
     // below and behind the helicopter and swings. Probe where they actually
     // END, not where their tow point is.
     float banTailX = S.banX - S.banDir * 27.f;
+    // The airship's stern streamer reaches ~18 cells behind the hull and its
+    // nose ~11 ahead, so both ends get a row.
+    float airNose = S.airX + S.airDir * 11.f;
+    float airFlag = S.airX - S.airDir * 18.5f;
     bool up[kN] = {S.dragonUp,  S.dragonUp, S.unicornUp, S.ufoUp, S.riderUp,
-                   S.witchUp,   S.balloonUp[0], S.bannerUp, S.chopUp};
+                   S.witchUp,   S.balloonUp[0], S.bannerUp, S.chopUp,
+                   S.airUp,     S.airUp};
     float px[kN] = {S.dragX[0], S.dragX[kTail], S.uniX, S.ufoX, S.riderX,
-                    S.witchX,   S.balloonX[0], banTailX, S.wallX};
+                    S.witchX,   S.balloonX[0], banTailX, S.wallX,
+                    airNose,    airFlag};
     float py[kN] = {S.dragY[0], S.dragY[kTail], S.uniY, S.ufoY, S.riderY,
-                    S.witchY,   S.balloonY[0], S.banY, S.wallY};
+                    S.witchY,   S.balloonY[0], S.banY, S.wallY,
+                    S.airY,     S.airY};
     for (int k = 0; k < kN; ++k) {
       Track& q = tr[k];
       if (up[k]) {
@@ -271,7 +279,7 @@ int skySchedule(float upTo) {
   static const E kAll[] = {
       {"dragon", &SKY_DRAGON}, {"unicorn", &SKY_UNICORN}, {"ufo", &SKY_UFO},
       {"rider", &SKY_RIDER},   {"witch", &SKY_WITCH},     {"banner", &SKY_BANNER},
-      {"chopper", &SKY_CHOPPER}};
+      {"chopper", &SKY_CHOPPER}, {"airship", &SKY_AIRSHIP}};
   for (const E& e : kAll) {
     std::printf("%-8s dwell %5.0fs  mid-crossing at animT:", e.name, e.f->dwell);
     int shown = 0;

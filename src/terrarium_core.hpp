@@ -566,6 +566,11 @@ inline constexpr SkyFlyer SKY_BANNER  = {310.f, 54.f, 0xBA22E7u, 0x9F10Du, 3u, 1
 // A helicopter towing an LED video wall on a chain. The rarest thing in the
 // sky and the only one that is itself a light source.
 inline constexpr SkyFlyer SKY_CHOPPER = {430.f, 72.f, 0xC40FFEu, 0x3E1A5u, 4u, 1u};
+// A fantasy airship: a striped envelope with a little wooden ship's hull
+// slung underneath. The SLOWEST thing up here bar the balloons, and the
+// longest crossing of anything — it is scenery rather than an event, and it
+// should take its time getting across.
+inline constexpr SkyFlyer SKY_AIRSHIP = {340.f, 96.f, 0xA125B7u, 0x6D30Cu, 3u, 0u};
 
 // Is this flyer crossing right now? `age` is how far into the crossing it
 // is, and `h` the epoch hash the caller uses to pick lanes/colours.

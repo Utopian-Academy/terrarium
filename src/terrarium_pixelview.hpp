@@ -317,6 +317,10 @@ struct PixelviewSkyCast {
   bool chopUp = false;
   float chopX = 0.f, chopY = 0.f, chopDir = 1.f, chopAge = 0.f;
   float wallX = 0.f, wallY = 0.f;
+  // A fantasy airship. Slow, level, and long.
+  bool airUp = false;
+  float airX = 0.f, airY = 0.f, airDir = 1.f, airAge = 0.f;
+  uint32_t airHue = 0;
   static const int kBirds = 9;
   float birdX[kBirds], birdY[kBirds];
   bool flamingo = false;
@@ -606,6 +610,30 @@ inline PixelviewSkyCast& pixelviewSkyCast(float animT) {
       float swing = 3.4f * std::sin(animT * 0.62f) + 1.5f * std::sin(animT * 0.29f);
       S.wallX = S.chopX - S.chopDir * 3.2f + swing;
       S.wallY = S.chopY + 13.5f + 0.9f * std::cos(animT * 0.62f);
+    }
+  }
+
+  // The airship. Dead level and very slow: it holds its altitude to within a
+  // cell or two across the whole crossing, which is what separates it from
+  // the balloons (which drift wherever the wind goes) and from everything
+  // else up here (which is in a hurry). Majestic is a speed.
+  {
+    float age = 0.f; uint32_t hh = 0u;
+    const float cross = SKY_AIRSHIP.dwell;
+    S.airUp = skyFlyerUp(SKY_AIRSHIP, animT, &age, &hh);
+    if (S.airUp) {
+      float p = age / cross;
+      S.airDir = ((hh >> 9) & 1u) ? 1.f : -1.f;
+      float lane = 0.20f + 0.46f * (float)((hh >> 15) & 255u) / 255.f;
+      // The stern streamer reaches 18.5 cells behind the hull, and 20 was
+      // not enough to carry it clear — --selftest caught the flag popping
+      // out on the first run, which is exactly what that probe is for.
+      const float kHalf = 30.f;
+      S.airX = (S.airDir > 0.f) ? (-kHalf + p * (fw + kHalf * 2.f))
+                                : (fw + kHalf - p * (fw + kHalf * 2.f));
+      S.airY = fh * lane + 1.3f * std::sin(animT * 0.33f);
+      S.airAge = age;
+      S.airHue = hh;
     }
   }
 
@@ -1110,6 +1138,122 @@ inline void pixelviewSkyCell(const World& w, int x, int y, float animT,
       // The tow line, from the tail back to the leading edge of the cloth.
       else if (s < 0.8f && std::fabs(by) < 0.6f) {
         paint(210.f, 205.f, 190.f, 0.55f);
+      }
+    }
+  }
+
+  // THE AIRSHIP. What makes this a fantasy airship rather than a Hindenburg
+  // is entirely the things hanging off it: a wooden ship's HULL instead of a
+  // cabin, and PENNANTS. A grey envelope with a box under it is history; the
+  // same envelope in stripes with a boat and flags is a story. At this scale
+  // those two details are most of the object's character.
+  if (S.airUp) {
+    float d = S.airDir;
+    float ax = (fx - S.airX) * d, ay = fy - S.airY;
+    static const uint8_t kShip[4][6] = {
+        {186,  62,  72,  248, 234, 208},   // carmine / cream
+        { 92,  70, 160,  246, 214, 128},   // violet / gold
+        { 38, 118, 118,  242, 236, 214},   // teal / bone
+        {166,  96,  40,  250, 226, 178},   // rust / sand
+    };
+    const uint8_t* pal = kShip[S.airHue % 4u];
+
+    // ---- Envelope ----
+    // Pointed at both ends rather than a plain ellipse: raising the profile
+    // to a power under 1 pulls the nose and tail out into a taper, which is
+    // the difference between an airship and a sausage.
+    // The ENVELOPE has to dominate. The first attempt made it 21 cells long
+    // and 7 tall with the hull nearly as big, and banded it lengthwise into
+    // five stripes — which came out as a stack of planks with a boat under
+    // it, a flying raft rather than an airship. The gas bag is the object;
+    // everything else hangs off it and should be small by comparison.
+    const float kLen = 10.5f, kTall = 4.8f;
+    float u2 = ax / kLen;
+    if (std::fabs(u2) < 1.f) {
+      float prof = kTall * std::pow(1.f - u2 * u2, 0.62f);
+      if (std::fabs(ay) < prof) {
+        // Lit along the top, shaded underneath — a big smooth volume needs
+        // that gradient or it reads as a flat decal.
+        float vv = ay / std::max(0.6f, prof);
+        float lit = 0.74f + 0.32f * (0.5f - vv);
+        // ONE bold stripe along the centreline over a pale envelope, which
+        // is how airships have always been painted and reads far cleaner at
+        // this size than any repeating band.
+        bool stripe = std::fabs(vv + 0.05f) < 0.30f;
+        const uint8_t* c = stripe ? pal : pal + 3;
+        paint((float)c[0] * lit, (float)c[1] * lit, (float)c[2] * lit, 1.f);
+        // A nose cap, so the front is distinguishable from the back at a
+        // glance and the ship has a direction.
+        if (u2 > 0.84f)
+          paint((float)pal[0] * 0.85f, (float)pal[1] * 0.85f,
+                (float)pal[2] * 0.85f, 0.9f);
+      }
+    }
+    // ---- Tail fins ----
+    // A small cruciform tail right at the stern. Oversized fins read as an
+    // arrowhead stuck on the back.
+    if (ax < -8.0f && ax > -11.4f) {
+      float reach = 3.3f * (1.f - (std::fabs(ax) - 8.0f) / 3.4f) + 1.4f;
+      if (std::fabs(ay) < reach && std::fabs(ay) > 0.8f)
+        paint((float)pal[0] * 0.92f, (float)pal[1] * 0.92f,
+              (float)pal[2] * 0.92f, 1.f);
+    }
+    // ---- The hull ----
+    // A little wooden boat, slung under the envelope on two short cables.
+    // Flat sheer line on top, curved forefoot and stern below. Deliberately
+    // small: it is a jolly boat under a gas bag, not a barge.
+    float hy = ay - 6.9f;
+    float hull = 3.8f;
+    if (std::fabs(ax + 0.4f) < hull && hy > -1.2f) {
+      float uh = (ax + 0.4f) / hull;
+      float depth = 2.0f * std::pow(1.f - uh * uh, 0.55f);
+      if (hy < depth) {
+        // Planking: alternate two timber tones by row.
+        bool plank = ((int)std::floor(hy + 4.f) & 1) == 0;
+        float tr = plank ? 162.f : 132.f, tg = plank ? 112.f : 88.f,
+              tb = plank ? 66.f : 50.f;
+        // A painted strake along the gunwale, in the ship's own colour.
+        if (hy < -0.4f) { tr = (float)pal[0]; tg = (float)pal[1]; tb = (float)pal[2]; }
+        paint(tr, tg, tb, 1.f);
+        // Portholes, lit after dark. At night this is nearly all you see of
+        // the hull, and a row of warm dots under a dark envelope is the
+        // whole picture of somebody being aboard.
+        if (lv < 0.45f && hy > 0.1f && hy < 1.1f) {
+          float ph = std::fmod(std::fabs(ax + 0.4f), 2.0f);
+          if (ph < 0.75f) paint(255.f, 206.f, 128.f, 0.95f);
+        }
+      }
+    }
+    // Suspension cables from the hull's gunwale up into the envelope.
+    for (int s2 = -1; s2 <= 1; s2 += 2) {
+      float cxx = (float)s2 * 2.7f - 0.4f;
+      if (std::fabs(ax - cxx) < 0.5f && ay > 3.6f && ay < 6.0f)
+        paint(70.f, 58.f, 46.f, 0.8f);
+    }
+    // ---- Pennants ----
+    // One at the masthead and one off the stern, both rippling. Flags are
+    // what stop this being an aircraft and make it a SHIP.
+    {
+      // Masthead: a short staff above the envelope, forward of centre.
+      float stx = 3.0f;
+      if (std::fabs(ax - stx) < 0.45f && ay < -4.3f && ay > -7.1f)
+        paint(90.f, 72.f, 54.f, 0.9f);
+      for (int k = 0; k < 9; ++k) {
+        float f2 = (float)k / 8.f;
+        float flx = stx - 0.6f - f2 * 6.4f;
+        float fly = -6.7f + 1.25f * std::sin(f2 * 4.2f - animT * 4.6f) * f2;
+        float thick = 0.80f * (1.f - f2 * 0.72f);   // tapers to a point
+        if (std::fabs(ax - flx) < 0.62f && std::fabs(ay - fly) < thick)
+          paint((float)pal[3] * 0.98f, (float)pal[4] * 0.98f,
+                (float)pal[5] * 0.98f, 0.95f);
+      }
+      // Stern streamer, longer and thinner.
+      for (int k = 0; k < 9; ++k) {
+        float f2 = (float)k / 8.f;
+        float flx = -12.0f - f2 * 6.5f;
+        float fly = 0.4f + 1.9f * std::sin(f2 * 3.6f - animT * 3.9f) * f2;
+        if (std::fabs(ax - flx) < 0.6f && std::fabs(ay - fly) < 0.62f)
+          paint((float)pal[3], (float)pal[4], (float)pal[5], 0.9f);
       }
     }
   }
