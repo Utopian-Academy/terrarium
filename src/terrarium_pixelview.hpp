@@ -133,8 +133,11 @@ inline float pixelviewCloudF(float fx, float fy, float scale, uint32_t salt) {
 // slow group envelope (waves arrive in sets). Island mode propagates
 // radially inward; mainland follows the wind. Used by BOTH the deep and
 // the shallows so sets roll continuously from open sea into the break.
+// No per-cell hash here any more, by design: everything this returns is a
+// property of the WATER at a place, not of the cell that happens to be
+// drawing it. That is what makes neighbours agree.
 inline float pixelviewSwell(const World& w, int x, int y, float animT,
-                            uint32_t h, float* grpOut, float* chopOut = nullptr) {
+                            float* grpOut, float* chopOut = nullptr) {
   // A sea current, not a bullseye: one coherent directional flow across
   // the whole ocean (radial island waves read as a clock face). Wind sets
   // the heading; it veers slowly (~10 min) so the sea never goes static.
@@ -2688,7 +2691,7 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
         // Previously the deep and the shallows ran different maths, so big
         // bands marched across open water and never broke on anything.
         float grp, chop;
-        float swell = pixelviewSwell(w, x, y, animT, h, &grp, &chop);
+        float swell = pixelviewSwell(w, x, y, animT, &grp, &chop);
 
         // How much this cell feels the bottom: 0 in the deep, 1 in the surf.
         float shoal = std::clamp((5.f - (float)d) / 4.f, 0.f, 1.f);
