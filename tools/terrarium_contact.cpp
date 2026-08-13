@@ -18,7 +18,9 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "terrarium_core.hpp"
@@ -598,6 +600,106 @@ int benchBiomes(int warm, int frames) {
   return 0;
 }
 
+// Does the brightness knob actually reach every biome?
+//
+// This is the one control a gallery has to be able to trust: a piece that
+// cannot be turned down is a piece that cannot be hung. But brightness is
+// applied per-ELEMENT inside the renderer — every star, every window, every
+// wing carries its own `* br` — rather than once at the end. That works right
+// up until a biome paints its background directly instead of tinting terrain,
+// at which point the background misses the knob entirely and nothing about
+// reading the code makes it obvious. So turn the knob down and MEASURE.
+//
+// Each biome is rendered whole at 1.0 and again at the knob's floor, and what
+// is checked is the floor's mean luminance as a fraction of full. At 0.05
+// there should be almost nothing left; anything much above that has paint in
+// it the knob never touched.
+void setEnvVar(const char* k, const char* v) {
+#ifdef _WIN32
+  _putenv_s(k, v);
+#else
+  setenv(k, v, 1);
+#endif
+}
+
+bool writeKnob(const std::string& home, float v) {
+  std::string p = home + "/.terrarium-brightness";
+  FILE* f = std::fopen(p.c_str(), "w");
+  if (!f) return false;
+  std::fprintf(f, "%.3f\n", v);
+  std::fclose(f);
+  return true;
+}
+
+double meanPanelLuma(const World& w, float animT) {
+  double sum = 0.0;
+  for (int y = 0; y < H; ++y)
+    for (int x = 0; x < W; ++x) {
+      PixelviewRGB c = pixelviewCellColor(w, x, y, 0, animT);
+      sum += 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+    }
+  return sum / (double)(W * H);
+}
+
+int brightnessAudit(int warm, float animT) {
+  // Point HOME at a scratch directory for the duration. The knob is a real
+  // file in the real home directory, and on the Pi that file is the LIVE
+  // control — an audit that writes to it would dim the kiosk, and would leave
+  // it dim if the audit ever crashed halfway. It also means the numbers below
+  // are not quietly graded by whatever contrast/harmony the panel is set to.
+  const char* tmp = std::getenv("TMPDIR");
+  if (!tmp || !*tmp) tmp = std::getenv("TEMP");
+  if (!tmp || !*tmp) tmp = "/tmp";
+  std::string scratch = tmp;
+  const char* oldHome = std::getenv("HOME");
+  std::string keepHome = oldHome ? oldHome : "";
+  setEnvVar("HOME", scratch.c_str());
+
+  std::vector<World> worlds((size_t)BIOME_COUNT);
+  for (int b = 0; b < BIOME_COUNT; ++b) {
+    Rng rng(4242u + (uint32_t)b * 31u);
+    seedWorld(worlds[b], rng, (Biome)b);
+    std::string banner;
+    for (int k = 0; k < warm; ++k) {
+      step(worlds[b], rng, banner, k);
+      g_stepEvents.clear();
+    }
+  }
+
+  if (!writeKnob(scratch, 1.0f)) {
+    std::fprintf(stderr, "cannot write the knob under %s\n", scratch.c_str());
+    return 2;
+  }
+  std::vector<double> full((size_t)BIOME_COUNT, 0.0);
+  for (int b = 0; b < BIOME_COUNT; ++b) full[b] = meanPanelLuma(worlds[b], animT);
+
+  // displayBrightness() re-reads at most once a second, which is exactly what
+  // you want on the panel and exactly what you have to wait out here.
+  writeKnob(scratch, 0.05f);
+  std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+
+  // The floor should leave a nearly-black panel. 0.30 is generous: it allows
+  // for the handful of things that are meant to stay legible when dimmed, and
+  // still catches a whole background that never saw the knob.
+  const double kFail = 0.30;
+  std::printf("%-9s  %8s  %8s  %7s\n", "biome", "at 1.00", "at 0.05", "left");
+  int bad = 0;
+  for (int b = 0; b < BIOME_COUNT; ++b) {
+    double dim = meanPanelLuma(worlds[b], animT);
+    double frac = full[b] > 1.0 ? dim / full[b] : 0.0;
+    const char* flag = "";
+    if (frac > kFail) { flag = "   <-- KNOB DOES NOT REACH"; ++bad; }
+    std::printf("%-9s  %8.1f  %8.1f  %6.0f%%%s\n", biomeName((Biome)b), full[b],
+                dim, frac * 100.0, flag);
+  }
+  std::printf("\n%s: %d biome(s) cannot be turned down\n", bad ? "FAIL" : "ok",
+              bad);
+
+  writeKnob(scratch, 1.0f);
+  if (!keepHome.empty()) setEnvVar("HOME", keepHome.c_str());
+  return bad;
+}
+
 int biomeFromName(const std::string& n) {
   for (int i = 0; i < BIOME_COUNT; ++i) {
     std::string bn = biomeName((Biome)i);
@@ -646,6 +748,7 @@ int main(int argc, char** argv) {
     else if (a == "--sky-schedule") return skySchedule(6000.f);
     else if (a == "--blooms") return bloomAudit(warm, animT, out.c_str(), scale);
     else if (a == "--bench") return benchBiomes(warm, 8);
+    else if (a == "--brightness") return brightnessAudit(warm, animT);
     else if (a == "--daynight") g_daynightMode = std::atoi(need(i).c_str());
     else {
       std::fprintf(stderr, "unknown option: %s\n", a.c_str());

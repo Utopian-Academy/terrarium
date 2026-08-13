@@ -767,7 +767,6 @@ inline void pixelviewSkyCell(const World& w, int x, int y, float animT,
                              float& bb) {
   const float fw = (float)W, fh = (float)H;
   const float fx = (float)x, fy = (float)y;
-  float br = displayBrightness();
 
   // ---- The air itself ----
   // Looking up, the deepest colour is at the zenith and it pales toward the
@@ -810,7 +809,7 @@ inline void pixelviewSkyCell(const World& w, int x, int y, float animT,
     uint32_t sh = hash3((uint32_t)x, (uint32_t)y, w.worldSeed ^ 0x57A25u);
     if ((sh % 190u) == 0u) {
       float tw = 0.55f + 0.45f * std::sin(animT * 1.7f + (float)(sh & 63u));
-      float p = sNight * tw * br;
+      float p = sNight * tw;
       rr += 190.f * p; gg += 200.f * p; bb += 225.f * p;
     }
   }
@@ -920,9 +919,9 @@ inline void pixelviewSkyCell(const World& w, int x, int y, float animT,
   const PixelviewSkyCast& S = pixelviewSkyCast(animT);
   auto paint = [&](float pr, float pg, float pb, float amt) {
     amt = std::clamp(amt, 0.f, 1.f);
-    rr += (pr * br - rr) * amt;
-    gg += (pg * br - gg) * amt;
-    bb += (pb * br - bb) * amt;
+    rr += (pr - rr) * amt;
+    gg += (pg - gg) * amt;
+    bb += (pb - bb) * amt;
   };
 
   // Contrails first: everything else flies in front of them.
@@ -1689,6 +1688,22 @@ inline void pixelviewSkyCell(const World& w, int x, int y, float animT,
       paint(255.f, 246.f, 210.f, 0.75f * tw);
     }
   }
+
+  // The brightness knob, applied ONCE, to everything, at the very end.
+  //
+  // Everywhere else in the renderer brightness rides along on each element —
+  // every window, every firefly carries its own `* br` — because there is
+  // terrain underneath that has already been dimmed, and the element has to
+  // match it. Up here there is no terrain: the air, the clouds and the wind
+  // streaks are all painted as absolute colours, so each one had to remember
+  // the knob for itself and the background never did. Turning the panel down
+  // left the sky at 99% of full, which on a round LED disc at night is the
+  // whole piece shouting.
+  //
+  // One multiply at the exit is the only version of this that cannot rot: the
+  // next thing that flies past cannot forget to be dimmable.
+  float br = displayBrightness();
+  rr *= br; gg *= br; bb *= br;
 }
 
 // ---------------------------------------------------------------------
