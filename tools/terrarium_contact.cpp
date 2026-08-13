@@ -700,6 +700,162 @@ int brightnessAudit(int warm, float animT) {
   return bad;
 }
 
+// Is the coral actually on the panel?
+//
+// A reef is painted in the water branch and then the wave model runs over the
+// top of it, and the wave model ASSIGNS the sea colour rather than blending —
+// so anything the seabed contributed is gone before the frame ends. That is
+// invisible in the code (the two blocks are eighty lines apart) and nearly
+// invisible in a render, because a reef is small and the surf breaking over
+// it looks busy enough to pass for detail.
+//
+// The test is a colour fact rather than a judgement: coral is pink, orange,
+// violet or cream, so it is RED-dominant; sea water at every depth in every
+// biome is blue-dominant. A reef cell that renders with more blue than red is
+// a reef cell you cannot see.
+int reefAudit(int warm, float animT) {
+  std::printf("%-9s  %6s  %6s   %-22s  %s\n", "biome", "reef", "warm",
+              "mean reef colour", "vs open water");
+  int bad = 0;
+  for (int b = 0; b < BIOME_COUNT; ++b) {
+    if ((Biome)b != OCEAN && (Biome)b != TROPICAL) continue;
+    Rng rng(808u + (uint32_t)b);
+    World world;
+    seedWorld(world, rng, (Biome)b);
+    std::string banner;
+    for (int k = 0; k < warm; ++k) {
+      step(world, rng, banner, k);
+      g_stepEvents.clear();
+    }
+    long reefN = 0, warmN = 0, seaN = 0;
+    double rs = 0, gs = 0, bs = 0, sr = 0, sg = 0, sb = 0;
+    for (int y = 0; y < H; ++y)
+      for (int x = 0; x < W; ++x) {
+        int d = (int)world.water[y][x];
+        if (d <= 0 || d > 3) continue;              // the reef's own depth band
+        PixelviewRGB c = pixelviewCellColor(world, x, y, 0, animT);
+        if (world.terrain[y][x] == 'C') {
+          ++reefN; rs += c.r; gs += c.g; bs += c.b;
+          if (c.r > c.b) ++warmN;                   // reads as coral, not sea
+        } else {
+          ++seaN; sr += c.r; sg += c.g; sb += c.b;
+        }
+      }
+    if (!reefN) {
+      std::printf("%-9s  %6s  %6s   %-22s  %s\n", biomeName((Biome)b), "none",
+                  "-", "-", "no coral seeded");
+      continue;
+    }
+    double frac = (double)warmN / (double)reefN;
+    // Some of a reef is legitimately under breaking whitewater at any moment,
+    // and white is not red-dominant. But most of it should not be.
+    const char* flag = "";
+    if (frac < 0.50) { flag = "   <-- REEF IS PAINTED OVER"; ++bad; }
+    char reefC[32], seaC[32];
+    std::snprintf(reefC, sizeof reefC, "%3.0f %3.0f %3.0f", rs / reefN,
+                  gs / reefN, bs / reefN);
+    std::snprintf(seaC, sizeof seaC, "%3.0f %3.0f %3.0f", seaN ? sr / seaN : 0,
+                  seaN ? sg / seaN : 0, seaN ? sb / seaN : 0);
+    std::printf("%-9s  %6ld  %5.0f%%   %-22s  %s%s\n", biomeName((Biome)b),
+                reefN, frac * 100.0, reefC, seaC, flag);
+  }
+  std::printf("\n%s: %d reef(s) invisible under the wave model\n",
+              bad ? "FAIL" : "ok", bad);
+  return bad;
+}
+
+// Does the water BOIL?
+//
+// A wave is coherent: neighbouring cells brighten and darken together,
+// because they are on the same face of the same swell. A per-cell random
+// re-rolled every frame is not a wave — it is white noise, and on a 1px/cell
+// LED panel white noise reads as a glassy shimmer crawling over the surface.
+// The two are impossible to tell apart in a still and obvious in motion,
+// which is the worst combination for judging by screenshot.
+//
+// So: render successive frames, take the per-cell luminance delta between
+// them, and ask how much that delta agrees with its neighbours'. High change
+// WITH agreement is a wave. High change WITHOUT agreement is a boil.
+int shimmerAudit(int warm) {
+  struct Zone { const char* name; double d = 0; long n = 0;
+                double sxy = 0, sxx = 0, syy = 0; };
+  std::printf("%-9s  %-11s  %7s  %9s  %s\n", "biome", "zone", "flicker",
+              "coherence", "");
+  int bad = 0;
+  for (int b = 0; b < BIOME_COUNT; ++b) {
+    if ((Biome)b != OCEAN && (Biome)b != TROPICAL) continue;
+    Rng rng(808u + (uint32_t)b);
+    World world;
+    seedWorld(world, rng, (Biome)b);
+    std::string banner;
+    for (int k = 0; k < warm; ++k) {
+      step(world, rng, banner, k);
+      g_stepEvents.clear();
+    }
+    // 0.2s apart: exactly one step of the fastest term in the wave model, so
+    // nothing is sampled so slowly that it aliases into looking still.
+    const int kFrames = 16;
+    std::vector<std::vector<double>> lum((size_t)kFrames);
+    for (int f = 0; f < kFrames; ++f) {
+      lum[f].resize((size_t)W * H);
+      float animT = 20.f + 0.2f * (float)f;
+      for (int y = 0; y < H; ++y)
+        for (int x = 0; x < W; ++x) {
+          PixelviewRGB c = pixelviewCellColor(world, x, y, 0, animT);
+          lum[f][(size_t)y * W + x] = 0.299 * c.r + 0.587 * c.g + 0.114 * c.b;
+        }
+    }
+    Zone shallow{"reef/shallow"}, open{"open water"};
+    for (int f = 1; f < kFrames; ++f) {
+      for (int y = 1; y < H - 1; ++y)
+        for (int x = 1; x < W - 1; ++x) {
+          int d = (int)world.water[y][x];
+          if (d <= 0) continue;
+          Zone& z = (d <= 3) ? shallow : open;
+          auto del = [&](int xx, int yy) {
+            size_t i = (size_t)yy * W + xx;
+            return lum[f][i] - lum[f - 1][i];
+          };
+          double here = del(x, y);
+          // Agreement with the neighbours' delta, as a correlation over the
+          // whole zone. A swell face moves as a sheet; a dither does not.
+          double nb = (del(x - 1, y) + del(x + 1, y) + del(x, y - 1) +
+                       del(x, y + 1)) * 0.25;
+          z.d += std::fabs(here);
+          z.sxy += here * nb; z.sxx += here * here; z.syy += nb * nb;
+          z.n++;
+        }
+    }
+    for (Zone* z : {&shallow, &open}) {
+      if (!z->n) continue;
+      double flick = z->d / (double)z->n;
+      double denom = std::sqrt(z->sxx * z->syy);
+      double coh = denom > 1e-9 ? z->sxy / denom : 0.0;
+      // Only the shallows are GATED, and the honesty of that is worth
+      // stating. The reef zone is where a boil was reported, measured,
+      // attributed and fixed: it ran at 0.04 correlation and now runs near
+      // 0.5, so 0.30 is a regression line drawn under a known result.
+      //
+      // Open water measures around 0.15 and I could not attribute that to
+      // any single term — killing the glitter, the chop, the wash and the
+      // palette quantisation each moved it a little and none of them
+      // explained it. Nobody has said the open sea looks wrong, and a
+      // threshold I invented should not get to drive changes to something
+      // that may well be fine. So it is printed and not judged, and it
+      // stays printed so the number is in front of whoever looks next.
+      bool gated = (z == &shallow);
+      const char* flag = "";
+      if (gated && flick > 4.0 && coh < 0.30) { flag = "   <-- BOILING"; ++bad; }
+      else if (!gated) flag = "   (not judged)";
+      std::printf("%-9s  %-11s  %7.2f  %9.2f%s\n", biomeName((Biome)b),
+                  z->name, flick, coh, flag);
+    }
+  }
+  std::printf("\n%s: %d zone(s) shimmering instead of moving\n",
+              bad ? "FAIL" : "ok", bad);
+  return bad;
+}
+
 int biomeFromName(const std::string& n) {
   for (int i = 0; i < BIOME_COUNT; ++i) {
     std::string bn = biomeName((Biome)i);
@@ -749,6 +905,8 @@ int main(int argc, char** argv) {
     else if (a == "--blooms") return bloomAudit(warm, animT, out.c_str(), scale);
     else if (a == "--bench") return benchBiomes(warm, 8);
     else if (a == "--brightness") return brightnessAudit(warm, animT);
+    else if (a == "--reef") return reefAudit(warm, animT);
+    else if (a == "--shimmer") return shimmerAudit(warm);
     else if (a == "--daynight") g_daynightMode = std::atoi(need(i).c_str());
     else {
       std::fprintf(stderr, "unknown option: %s\n", a.c_str());

@@ -158,16 +158,31 @@ inline float pixelviewSwell(const World& w, int x, int y, float animT,
   float base2 = (float)x * std::cos(wa2) + (float)y * std::sin(wa2);
   float s2 = std::sin(0.21f * base2 + animT * 1.02f +
                       0.5f * std::sin(ang * 0.7f - animT * 0.09f));
-  // Chop: short, fast, wind-aligned, and incoherent — the surface texture.
-  float chop = std::sin(1.35f * base + animT * 5.2f + (float)(h & 15u) * 0.41f) *
-               0.6f +
-               std::sin(1.90f * (base * 0.7f + along * 0.7f) - animT * 6.4f +
-                        (float)((h >> 4) & 15u) * 0.37f) * 0.4f;
-
   // Sets: long groups, so the sea breathes instead of pulsing evenly.
   float grp = 0.55f + 0.45f * std::sin(0.045f * base + animT * 0.30f +
                                        0.7f * std::sin(along * 0.02f));
   if (grpOut) *grpOut = grp;
+
+  // Chop: short, fast, wind-aligned — the surface texture.
+  //
+  // Its phase used to come from the cell's own hash, spanning very nearly a
+  // full cycle. That was called "incoherent", and it is, but at one LED per
+  // cell incoherent is not texture: neighbouring cells sat at unrelated
+  // points of the same six-radians-a-second oscillation, so the sea fizzed
+  // rather than rippled. The wavelengths here are already short — about 4.7
+  // and 3.3 cells — and that is where fine texture actually comes from.
+  //
+  // Replacing the hash with a couple of smooth sines fixed the fizz and gave
+  // back a knitted corrugation instead, which is the failure this file
+  // already warns about eight lines up. So the phase is dragged around by
+  // the SWELL, and the amplitude by the sets: chop rides on the long waves
+  // and is rougher in a big set than between them, which is both what the
+  // sea does and free, since s1, s2 and grp are all already in hand.
+  float cw = 1.5f * s1 + 1.2f * s2;
+  float chop = (std::sin(1.35f * base + animT * 5.2f + cw) * 0.6f +
+                std::sin(1.90f * (base * 0.7f + along * 0.7f) - animT * 6.4f +
+                         cw * 1.3f) * 0.4f) *
+               (0.55f + 0.45f * grp);
   // Wave energy follows the wind (live mode: the real wind).
   float energy = 0.70f + 0.10f * (float)w.wind.strength;
   if (chopOut) *chopOut = chop * (0.35f + 0.65f * energy);
@@ -2548,14 +2563,39 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
     if (((h >> 4) + (uint32_t)(tick / 6)) % 97u == 0u) { r = g = b = 235; }
 
     // Coral colonies glow through the shallow water.
+    //
+    // Kept as a colour rather than only written into r/g/b, because the wave
+    // model below ASSIGNS the sea colour instead of blending into it — so
+    // everything painted up here was thrown away before the frame ended, and
+    // a reef in open water rendered as a pale glassy patch of surf. Coral is
+    // SEABED: the sea body goes down, the seabed tints it, and the foam goes
+    // on top. That order is applied at the sea-body assignment below.
+    bool coral = false;
+    int cor[3] = {0, 0, 0};
     if (t == 'C' && d <= 3) {
-      switch ((h >> 5) % 4u) {
-        case 0:  r = 235; g = 110; b = 140; break;  // pink
-        case 1:  r = 240; g = 140; b = 70;  break;  // orange
-        case 2:  r = 175; g = 110; b = 220; break;  // violet
-        default: r = 245; g = 205; b = 160; break;  // cream
-      }
-      r -= d * 14; g -= d * 8; b += d * 4;  // seen through the water
+      // A reef is COLONIES, not confetti. Picking the colour from a per-cell
+      // hash gave every neighbouring polyp an unrelated one, so a reef read
+      // as scattered sweets on the seabed rather than as stands of coral —
+      // the same defect the flowers had, and the same cure: one dominant
+      // species per region from a low-frequency field, with a minority drawn
+      // freely so colonies mingle at their edges instead of tiling.
+      static const uint8_t kCoral[5][3] = {
+          {235, 110, 140},   // pink
+          {240, 140,  70},   // orange
+          {175, 110, 220},   // violet
+          {245, 205, 160},   // cream
+          {212,  92, 104},   // red
+      };
+      float dn = pixelviewValueNoise(x, y, 9.f, w.worldSeed ^ 0xC02A1u);
+      int dom = std::min(4, (int)(dn * 5.f));
+      int idx = (((h >> 17) & 255u) < 178u) ? dom : (int)((h >> 5) % 5u);
+      float v = 0.90f + 0.20f * (float)((h >> 9) & 63u) / 63.f;
+      cor[0] = (int)((float)kCoral[idx][0] * v);
+      cor[1] = (int)((float)kCoral[idx][1] * v);
+      cor[2] = (int)((float)kCoral[idx][2] * v);
+      cor[0] -= d * 14; cor[1] -= d * 8; cor[2] += d * 4;  // through the water
+      coral = true;
+      r = cor[0]; g = cor[1]; b = cor[2];
     }
 
     // Water in motion. Rivers (steep gradient) flow in EVERY biome — a
@@ -2589,12 +2629,50 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
       // rendered as standing whitewater: the flat grey sheets. Narrow water
       // takes the flowing-ripple path instead, whatever the gradient says.
       bool channel = landNear >= 16;
+      const int grad = std::abs(gx) + std::abs(gy);
+
+      // AND A LAGOON IS NOT A WATERCOURSE. The rule above also caught the
+      // inside of an atoll — enclosed water, ringed by its own reef, with no
+      // fall to it whatever — and sent it down the flowing-river path. That
+      // path takes its direction from the SIGN of the local height gradient,
+      // and on a lagoon floor, which the sim lays down perfectly flat, that
+      // sign is noise: every cell rippled along its own axis, at its own
+      // random phase (`h & 7`), several times a second. Coherence between
+      // neighbouring cells measured 0.04 — statistically, television static.
+      // That is the glassy shimmer that crawled over the coral.
+      //
+      // Water going nowhere gets its own treatment below. It is neither a
+      // river nor a sea, and pretending it is either is what went wrong.
+      // A RIVER IS A WATERCOURSE IN A LAND BIOME. The old rule made any
+      // shallow cell with a gradient of 2 a river, and a seabed is bumpy —
+      // so a census found 97.8% of all shallow water in TROPICAL taking the
+      // river path. The entire shallows of both sea biomes have been
+      // rendering as flowing water since the rule was written; the atoll is
+      // simply where it is most obvious, because there the ripple has no
+      // real swell around it to hide in.
+      //
+      // In the sea, enclosed shallow water is a lagoon and everything else
+      // is sea. On land, the narrow-channel test and the gradient test both
+      // still stand: that is what they were written for.
+      bool seaBiome = (w.biome == OCEAN || w.biome == TROPICAL);
+      bool lagoon = seaBiome && channel;
       // >=2 catches the gentle ~0.7/cell ramps of carved through-rivers,
       // not just steep mountain streams.
-      bool river = ((std::abs(gx) + std::abs(gy) >= 2) && d <= 3) || channel;
+      bool river = !lagoon &&
+                   (channel || (!seaBiome && grad >= 2 && d <= 3));
       bool stillBiome = (w.biome == WETLAND || w.biome == DESERT);
 
-      if (river) {
+      if (lagoon) {
+        // Sheltered water. One long, slow swell shared by the whole basin —
+        // phase from WORLD position only, so neighbouring cells are on the
+        // same wave and it reads as a surface rather than as a boil. No
+        // break and no glint: there is no fetch in here to build either.
+        float ph = 0.28f * ((float)x + 0.62f * (float)y) - animT * 0.75f;
+        float ripple = 0.68f * std::sin(ph) +
+                       0.32f * std::sin(ph * 0.43f + 1.7f);
+        int lift = (int)(ripple * 7.f);
+        r += lift / 2; g += lift; b += lift;
+      } else if (river) {
         float fx = (float)((gx > 0) - (gx < 0));
         float fy = (float)((gy > 0) - (gy < 0));
         float ph = 0.8f * ((float)x * fx + (float)y * fy) - animT * 2.8f;
@@ -2646,6 +2724,17 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
         g = (int)((float)kSea[lvl][1] + pale + (float)(j / 2));
         b = (int)((float)kSea[lvl][2] + pale * 0.8f + (float)(j / 2));
 
+        // The seabed, back on top of the water it is under. Strong in a
+        // knee-deep colony and fading with every cell of water above it —
+        // the glitter, the break and the wash all still run after this, so a
+        // wave breaking over the reef whites it out exactly as it should.
+        if (coral) {
+          float k = std::clamp(0.92f - 0.20f * (float)(d - 1), 0.f, 1.f);
+          r = (int)((float)r + ((float)cor[0] - (float)r) * k);
+          g = (int)((float)g + ((float)cor[1] - (float)g) * k);
+          b = (int)((float)b + ((float)cor[2] - (float)b) * k);
+        }
+
         // The lit face under a crest — again, only once it is shoaling.
         if (surf > 0.28f && surf <= 0.72f && shoal > 0.12f) {
           float f = (surf - 0.28f) / 0.44f * (0.55f * shoal);
@@ -2696,12 +2785,21 @@ inline PixelviewRGB pixelviewCellColor(const World& w, int x, int y, int tick,
         if (shore > 0.f) {
           float washPh = surf * 0.5f + 0.5f;
           float wash = shore * (0.35f + 0.45f * grp) * washPh;
-          uint32_t wh2 = hash3((uint32_t)x, (uint32_t)y,
-                               (uint32_t)(animT * 5.f) * 2654435761u);
-          if ((wh2 % 5u) < 2u) {
-            r = (int)(r + (232 - r) * wash);
-            g = (int)(g + (242 - g) * wash);
-            b = (int)(b + (248 - b) * wash);
+          // Foam is a THING ON THE WATER, not a coin flipped per cell per
+          // frame. The old dither re-rolled two cells in five, five times a
+          // second, with no agreement between neighbours whatsoever — which
+          // is a working definition of television static, and on a panel
+          // where one cell is one LED that is exactly how it read. A noise
+          // field drifting shorewards gives the same broken, patchy cover
+          // and gives it somewhere to be going.
+          float fn = pixelviewValueNoiseF((float)x + animT * 1.7f,
+                                          (float)y + animT * 1.1f, 5.5f,
+                                          w.worldSeed ^ 0xF0AAu);
+          if (fn > 0.50f) {
+            float k = wash * std::min(1.f, (fn - 0.50f) / 0.18f);
+            r = (int)(r + (232 - r) * k);
+            g = (int)(g + (242 - g) * k);
+            b = (int)(b + (248 - b) * k);
           }
         }
 
